@@ -24,6 +24,7 @@ struct msm_dsi_manager {
 	struct msm_dsi *dsi[DSI_MAX];
 
 	bool is_bonded_dsi;
+	bool is_dual_panel;
 	bool is_sync_needed;
 	int master_dsi_link_id;
 };
@@ -31,6 +32,7 @@ struct msm_dsi_manager {
 static struct msm_dsi_manager msm_dsim_glb;
 
 #define IS_BONDED_DSI()		(msm_dsim_glb.is_bonded_dsi)
+#define IS_DUAL_PANEL()		(msm_dsim_glb.is_dual_panel)
 #define IS_SYNC_NEEDED()	(msm_dsim_glb.is_sync_needed)
 #define IS_MASTER_DSI_LINK(id)	(msm_dsim_glb.master_dsi_link_id == id)
 
@@ -55,6 +57,7 @@ static int dsi_mgr_parse_of(struct device_node *np, int id)
 		msm_dsim->is_bonded_dsi = of_property_read_bool(np, "qcom,dual-dsi-mode");
 
 	if (msm_dsim->is_bonded_dsi) {
+		msm_dsim->is_dual_panel = of_property_read_bool(np, "qcom,dual-panel");
 		if (of_property_read_bool(np, "qcom,master-dsi"))
 			msm_dsim->master_dsi_link_id = id;
 		if (!msm_dsim->is_sync_needed)
@@ -216,6 +219,7 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 	struct mipi_dsi_host *host = msm_dsi->host;
 	struct msm_dsi_phy_shared_timings phy_shared_timings[DSI_MAX];
 	bool is_bonded_dsi = IS_BONDED_DSI();
+	bool is_dual_panel = IS_DUAL_PANEL();
 	int ret;
 
 	DBG("id=%d", id);
@@ -224,7 +228,8 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 	if (ret)
 		goto phy_en_fail;
 
-	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id], is_bonded_dsi, msm_dsi->phy);
+	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id],
+				    is_bonded_dsi, is_dual_panel, msm_dsi->phy);
 	if (ret) {
 		pr_err("%s: power on host %d failed, %d\n", __func__, id, ret);
 		goto host_on_fail;
@@ -232,7 +237,8 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 
 	if (is_bonded_dsi && msm_dsi1) {
 		ret = msm_dsi_host_power_on(msm_dsi1->host,
-				&phy_shared_timings[DSI_1], is_bonded_dsi, msm_dsi1->phy);
+				&phy_shared_timings[DSI_1], is_bonded_dsi,
+				is_dual_panel, msm_dsi1->phy);
 		if (ret) {
 			pr_err("%s: power on host1 failed, %d\n",
 							__func__, ret);
