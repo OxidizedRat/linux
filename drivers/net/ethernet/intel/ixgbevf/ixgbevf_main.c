@@ -1221,6 +1221,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		    ether_addr_equal(rx_ring->netdev->dev_addr,
 				     eth_hdr(skb)->h_source)) {
 			dev_kfree_skb_irq(skb);
+			skb = NULL;
 			continue;
 		}
 
@@ -2716,8 +2717,7 @@ static int ixgbevf_set_interrupt_capability(struct ixgbevf_adapter *adapter)
 	v_budget = min_t(int, v_budget, num_online_cpus());
 	v_budget += NON_Q_VECTORS;
 
-	adapter->msix_entries = kcalloc(v_budget,
-					sizeof(struct msix_entry), GFP_KERNEL);
+	adapter->msix_entries = kzalloc_objs(struct msix_entry, v_budget);
 	if (!adapter->msix_entries)
 		return -ENOMEM;
 

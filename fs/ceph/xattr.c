@@ -819,15 +819,15 @@ start:
 		xattr_version = ci->i_xattrs.version;
 		spin_unlock(&ci->i_ceph_lock);
 
-		xattrs = kcalloc(numattr, sizeof(struct ceph_inode_xattr *),
-				 GFP_NOFS);
+		xattrs = kzalloc_objs(struct ceph_inode_xattr *, numattr,
+				      GFP_NOFS);
 		err = -ENOMEM;
 		if (!xattrs)
 			goto bad_lock;
 
 		for (i = 0; i < numattr; i++) {
-			xattrs[i] = kmalloc(sizeof(struct ceph_inode_xattr),
-					    GFP_NOFS);
+			xattrs[i] = kmalloc_obj(struct ceph_inode_xattr,
+						GFP_NOFS);
 			if (!xattrs[i])
 				goto bad_lock;
 		}
@@ -1220,7 +1220,7 @@ int __ceph_setxattr(struct inode *inode, const char *name,
 			goto out;
 	}
 
-	xattr = kmalloc(sizeof(struct ceph_inode_xattr), GFP_NOFS);
+	xattr = kmalloc_obj(struct ceph_inode_xattr, GFP_NOFS);
 	if (!xattr)
 		goto out;
 
@@ -1253,6 +1253,22 @@ retry:
 	doutc(cl, "%p %llx.%llx name '%s' issued %s\n", inode,
 	      ceph_vinop(inode), name, ceph_cap_string(issued));
 	__build_xattrs(inode);
+
+	/*
+	 * __build_xattrs() may have released and reacquired i_ceph_lock,
+	 * during which handle_cap_grant() could have replaced i_xattrs.blob
+	 * with a newer MDS-provided blob and bumped i_xattrs.version. If that
+	 * caused __build_xattrs() to rebuild the rb-tree from the new blob,
+	 * count/names_size/vals_size may now be larger than when
+	 * required_blob_size was computed above. Recompute it here so the
+	 * prealloc_blob size check below reflects the current tree state.
+	 */
+	required_blob_size = __get_required_blob_size(ci, name_len, val_len);
+	if (required_blob_size > mdsc->mdsmap->m_max_xattr_size) {
+		doutc(cl, "sync (size too large): %d > %llu\n",
+		      required_blob_size, mdsc->mdsmap->m_max_xattr_size);
+		goto do_sync;
+	}
 
 	if (!ci->i_xattrs.prealloc_blob ||
 	    required_blob_size > ci->i_xattrs.prealloc_blob->alloc_len) {
@@ -1294,6 +1310,7 @@ retry:
 
 do_sync:
 	spin_unlock(&ci->i_ceph_lock);
+	ceph_buffer_put(old_blob);
 do_sync_unlocked:
 	if (lock_snap_rwsem)
 		up_read(&mdsc->snap_rwsem);

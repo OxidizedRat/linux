@@ -17,7 +17,7 @@ MODULE_PARM_DESC(snapshot_debugbus, "Include debugbus sections in GPU devcoredum
 module_param_named(snapshot_debugbus, snapshot_debugbus, bool, 0600);
 
 int enable_preemption = -1;
-MODULE_PARM_DESC(enable_preemption, "Enable preemption (A7xx only) (1=on , 0=disable, -1=auto (default))");
+MODULE_PARM_DESC(enable_preemption, "Enable preemption (A7xx+ only) (1=on , 0=disable, -1=auto (default))");
 module_param(enable_preemption, int, 0600);
 
 bool disable_acd;
@@ -302,6 +302,7 @@ static const struct of_device_id dt_match[] = {
 	{ .compatible = "qcom,kgsl-3d0" },
 	{}
 };
+MODULE_DEVICE_TABLE(of, dt_match);
 
 static int adreno_runtime_resume(struct device *dev)
 {

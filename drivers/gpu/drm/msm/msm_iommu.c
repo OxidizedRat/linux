@@ -332,7 +332,7 @@ msm_iommu_pagetable_prealloc_allocate(struct msm_mmu *mmu, struct msm_mmu_preall
 	struct kmem_cache *pt_cache = get_pt_cache(mmu);
 	int ret;
 
-	p->pages = kvmalloc_array(p->count, sizeof(p->pages), GFP_KERNEL);
+	p->pages = kvmalloc_objs(*p->pages, p->count);
 	if (!p->pages)
 		return -ENOMEM;
 
@@ -521,7 +521,7 @@ struct msm_mmu *msm_iommu_pagetable_create(struct msm_mmu *parent, bool kernel_m
 	if (WARN_ONCE(!ttbr1_cfg, "No per-process page tables"))
 		return ERR_PTR(-ENODEV);
 
-	pagetable = kzalloc(sizeof(*pagetable), GFP_KERNEL);
+	pagetable = kzalloc_obj(*pagetable);
 	if (!pagetable)
 		return ERR_PTR(-ENOMEM);
 
@@ -677,7 +677,7 @@ static int msm_iommu_map(struct msm_mmu *mmu, uint64_t iova,
 			 int prot)
 {
 	struct msm_iommu *iommu = to_msm_iommu(mmu);
-	size_t ret;
+	ssize_t ret;
 
 	WARN_ON(off != 0);
 
@@ -686,7 +686,8 @@ static int msm_iommu_map(struct msm_mmu *mmu, uint64_t iova,
 		iova |= GENMASK_ULL(63, 49);
 
 	ret = iommu_map_sgtable(iommu->domain, iova, sgt, prot);
-	WARN_ON(!ret);
+	if (ret < 0)
+		return ret;
 
 	return (ret == len) ? 0 : -EINVAL;
 }
@@ -734,7 +735,7 @@ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
 
 	iommu_set_pgtable_quirks(domain, quirks);
 
-	iommu = kzalloc(sizeof(*iommu), GFP_KERNEL);
+	iommu = kzalloc_obj(*iommu);
 	if (!iommu) {
 		iommu_domain_free(domain);
 		return ERR_PTR(-ENOMEM);

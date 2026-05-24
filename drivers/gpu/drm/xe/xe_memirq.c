@@ -7,7 +7,6 @@
 
 #include "regs/xe_guc_regs.h"
 #include "regs/xe_irq_regs.h"
-#include "regs/xe_regs.h"
 
 #include "xe_assert.h"
 #include "xe_bo.h"
@@ -16,7 +15,6 @@
 #include "xe_gt.h"
 #include "xe_guc.h"
 #include "xe_hw_engine.h"
-#include "xe_map.h"
 #include "xe_memirq.h"
 #include "xe_tile_printk.h"
 
@@ -429,13 +427,25 @@ static bool memirq_received(struct xe_memirq *memirq, struct iosys_map *vector,
 	return __memirq_received(memirq, vector, offset, name, true);
 }
 
+static void memirq_assume_received(struct xe_memirq *memirq, const char *source,
+				   u16 offset, const char *status)
+{
+	memirq_debug(memirq, "ASSUME %s %s(%u)\n", source, status, offset);
+}
+
 static void memirq_dispatch_engine(struct xe_memirq *memirq, struct iosys_map *status,
 				   struct xe_hw_engine *hwe)
 {
 	memirq_debug(memirq, "STATUS %s %*ph\n", hwe->name, 16, status->vaddr);
 
-	if (memirq_received(memirq, status, ilog2(GT_MI_USER_INTERRUPT), hwe->name))
-		xe_hw_engine_handle_irq(hwe, GT_MI_USER_INTERRUPT);
+	/*
+	 * The programming note says to assume that GT_MI_USER_INTERRUPT is always
+	 * set. Check and clear related status byte just for a debug.
+	 */
+	if (IS_ENABLED(CONFIG_DRM_XE_DEBUG_MEMIRQ) &&
+	    !memirq_received(memirq, status, ilog2(GT_MI_USER_INTERRUPT), hwe->name))
+		memirq_assume_received(memirq, hwe->name, ilog2(GT_MI_USER_INTERRUPT), "USER");
+	xe_hw_engine_handle_irq(hwe, GT_MI_USER_INTERRUPT);
 }
 
 static void memirq_dispatch_guc(struct xe_memirq *memirq, struct iosys_map *status,
@@ -445,8 +455,14 @@ static void memirq_dispatch_guc(struct xe_memirq *memirq, struct iosys_map *stat
 
 	memirq_debug(memirq, "STATUS %s %*ph\n", name, 16, status->vaddr);
 
-	if (memirq_received(memirq, status, ilog2(GUC_INTR_GUC2HOST), name))
-		xe_guc_irq_handler(guc, GUC_INTR_GUC2HOST);
+	/*
+	 * The programming note says to assume that GUC_INTR_GUC2HOST is always
+	 * set. Check and clear related status byte just for a debug.
+	 */
+	if (IS_ENABLED(CONFIG_DRM_XE_DEBUG_MEMIRQ) &&
+	    !memirq_received(memirq, status, ilog2(GUC_INTR_GUC2HOST), name))
+		memirq_assume_received(memirq, name, ilog2(GUC_INTR_GUC2HOST), "GUC2HOST");
+	xe_guc_irq_handler(guc, GUC_INTR_GUC2HOST);
 
 	/*
 	 * This is a software interrupt that must be cleared after it's consumed

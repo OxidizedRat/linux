@@ -72,8 +72,7 @@ static int crush_decode_uniform_bucket(void **p, void *end,
 				       struct crush_bucket_uniform *b)
 {
 	dout("crush_decode_uniform_bucket %p to %p\n", *p, end);
-	ceph_decode_need(p, end, (1+b->h.size) * sizeof(u32), bad);
-	b->item_weight = ceph_decode_32(p);
+	ceph_decode_32_safe(p, end, b->item_weight, bad);
 	return 0;
 bad:
 	return -EINVAL;
@@ -231,7 +230,7 @@ static struct crush_choose_arg_map *alloc_choose_arg_map(void)
 {
 	struct crush_choose_arg_map *arg_map;
 
-	arg_map = kzalloc(sizeof(*arg_map), GFP_NOIO);
+	arg_map = kzalloc_obj(*arg_map, GFP_NOIO);
 	if (!arg_map)
 		return NULL;
 
@@ -241,22 +240,26 @@ static struct crush_choose_arg_map *alloc_choose_arg_map(void)
 
 static void free_choose_arg_map(struct crush_choose_arg_map *arg_map)
 {
-	if (arg_map) {
-		int i, j;
+	int i, j;
 
-		WARN_ON(!RB_EMPTY_NODE(&arg_map->node));
+	if (!arg_map)
+		return;
 
+	WARN_ON(!RB_EMPTY_NODE(&arg_map->node));
+
+	if (arg_map->args) {
 		for (i = 0; i < arg_map->size; i++) {
 			struct crush_choose_arg *arg = &arg_map->args[i];
-
-			for (j = 0; j < arg->weight_set_size; j++)
-				kfree(arg->weight_set[j].weights);
-			kfree(arg->weight_set);
+			if (arg->weight_set) {
+				for (j = 0; j < arg->weight_set_size; j++)
+					kfree(arg->weight_set[j].weights);
+				kfree(arg->weight_set);
+			}
 			kfree(arg->ids);
 		}
 		kfree(arg_map->args);
-		kfree(arg_map);
 	}
+	kfree(arg_map);
 }
 
 DEFINE_RB_FUNCS(choose_arg_map, struct crush_choose_arg_map, choose_args_index,
@@ -316,9 +319,8 @@ static int decode_choose_arg(void **p, void *end, struct crush_choose_arg *arg)
 	if (arg->weight_set_size) {
 		u32 i;
 
-		arg->weight_set = kmalloc_array(arg->weight_set_size,
-						sizeof(*arg->weight_set),
-						GFP_NOIO);
+		arg->weight_set = kmalloc_objs(*arg->weight_set,
+					       arg->weight_set_size, GFP_NOIO);
 		if (!arg->weight_set)
 			return -ENOMEM;
 
@@ -364,8 +366,8 @@ static int decode_choose_args(void **p, void *end, struct crush_map *c)
 		ceph_decode_64_safe(p, end, arg_map->choose_args_index,
 				    e_inval);
 		arg_map->size = c->max_buckets;
-		arg_map->args = kcalloc(arg_map->size, sizeof(*arg_map->args),
-					GFP_NOIO);
+		arg_map->args = kzalloc_objs(*arg_map->args, arg_map->size,
+					     GFP_NOIO);
 		if (!arg_map->args) {
 			ret = -ENOMEM;
 			goto fail;
@@ -386,11 +388,15 @@ static int decode_choose_args(void **p, void *end, struct crush_map *c)
 				goto fail;
 
 			if (arg->ids_size &&
-			    arg->ids_size != c->buckets[bucket_index]->size)
+			    (!c->buckets[bucket_index] ||
+			     arg->ids_size != c->buckets[bucket_index]->size))
 				goto e_inval;
 		}
 
-		insert_choose_arg_map(&c->choose_args, arg_map);
+		if (!__insert_choose_arg_map(&c->choose_args, arg_map)) {
+			ret = -EEXIST;
+			goto fail;
+		}
 	}
 
 	return 0;
@@ -439,7 +445,7 @@ static struct crush_map *crush_decode(void *pbyval, void *end)
 
 	dout("crush_decode %p to %p len %d\n", *p, end, (int)(end - *p));
 
-	c = kzalloc(sizeof(*c), GFP_NOFS);
+	c = kzalloc_obj(*c, GFP_NOFS);
 	if (c == NULL)
 		return ERR_PTR(-ENOMEM);
 
@@ -464,10 +470,10 @@ static struct crush_map *crush_decode(void *pbyval, void *end)
 	c->max_rules = ceph_decode_32(p);
 	c->max_devices = ceph_decode_32(p);
 
-	c->buckets = kcalloc(c->max_buckets, sizeof(*c->buckets), GFP_NOFS);
+	c->buckets = kzalloc_objs(*c->buckets, c->max_buckets, GFP_NOFS);
 	if (c->buckets == NULL)
 		goto badmem;
-	c->rules = kcalloc(c->max_rules, sizeof(*c->rules), GFP_NOFS);
+	c->rules = kzalloc_objs(*c->rules, c->max_rules, GFP_NOFS);
 	if (c->rules == NULL)
 		goto badmem;
 
@@ -513,6 +519,10 @@ static struct crush_map *crush_decode(void *pbyval, void *end)
 		b->id = ceph_decode_32(p);
 		b->type = ceph_decode_16(p);
 		b->alg = ceph_decode_8(p);
+		if (b->alg != alg) {
+			b->alg = 0;
+			goto bad;
+		}
 		b->hash = ceph_decode_8(p);
 		b->weight = ceph_decode_32(p);
 		b->size = ceph_decode_32(p);
@@ -520,7 +530,7 @@ static struct crush_map *crush_decode(void *pbyval, void *end)
 		dout("crush_decode bucket size %d off %x %p to %p\n",
 		     b->size, (int)(*p-start), *p, end);
 
-		b->items = kcalloc(b->size, sizeof(__s32), GFP_NOFS);
+		b->items = kzalloc_objs(__s32, b->size, GFP_NOFS);
 		if (b->items == NULL)
 			goto badmem;
 
@@ -586,7 +596,7 @@ static struct crush_map *crush_decode(void *pbyval, void *end)
 			  / sizeof(struct crush_rule_step))
 			goto bad;
 #endif
-		r = kmalloc(struct_size(r, steps, yes), GFP_NOFS);
+		r = kmalloc_flex(*r, steps, yes, GFP_NOFS);
 		if (r == NULL)
 			goto badmem;
 		dout(" rule %d is at %p\n", i, r);
@@ -1112,7 +1122,7 @@ struct ceph_osdmap *ceph_osdmap_alloc(void)
 {
 	struct ceph_osdmap *map;
 
-	map = kzalloc(sizeof(*map), GFP_NOIO);
+	map = kzalloc_obj(*map, GFP_NOIO);
 	if (!map)
 		return NULL;
 
@@ -1339,7 +1349,7 @@ static int __decode_pools(void **p, void *end, struct ceph_osdmap *map,
 
 		pi = lookup_pg_pool(&map->pg_pools, pool);
 		if (!incremental || !pi) {
-			pi = kzalloc(sizeof(*pi), GFP_NOFS);
+			pi = kzalloc_obj(*pi, GFP_NOFS);
 			if (!pi)
 				return -ENOMEM;
 
@@ -1699,7 +1709,7 @@ static int osdmap_decode(void **p, void *end, bool msgr2,
 	ceph_decode_need(p, end, 3*sizeof(u32) +
 			 map->max_osd*(struct_v >= 5 ? sizeof(u32) :
 						       sizeof(u8)) +
-				       sizeof(*map->osd_weight), e_inval);
+			 map->max_osd*sizeof(*map->osd_weight), e_inval);
 	if (ceph_decode_32(p) != map->max_osd)
 		goto e_inval;
 
@@ -1979,10 +1989,12 @@ struct ceph_osdmap *osdmap_apply_incremental(void **p, void *end, bool msgr2,
 			 sizeof(u64) + sizeof(u32), e_inval);
 	ceph_decode_copy(p, &fsid, sizeof(fsid));
 	epoch = ceph_decode_32(p);
-	BUG_ON(epoch != map->epoch+1);
 	ceph_decode_copy(p, &modified, sizeof(modified));
 	new_pool_max = ceph_decode_64(p);
 	new_flags = ceph_decode_32(p);
+
+	if (epoch != map->epoch + 1)
+		goto e_inval;
 
 	/* full map? */
 	ceph_decode_32_safe(p, end, len, e_inval);

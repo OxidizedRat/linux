@@ -213,7 +213,7 @@ static int clone_range_of_sgt_for_slice(struct qaic_device *qdev, struct sg_tabl
 		goto out;
 	}
 
-	sgt = kzalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kzalloc_obj(*sgt);
 	if (!sgt) {
 		ret = -ENOMEM;
 		goto out;
@@ -399,13 +399,13 @@ static int qaic_map_one_slice(struct qaic_device *qdev, struct qaic_bo *bo,
 	if (ret)
 		goto out;
 
-	slice = kmalloc(sizeof(*slice), GFP_KERNEL);
+	slice = kmalloc_obj(*slice);
 	if (!slice) {
 		ret = -ENOMEM;
 		goto free_sgt;
 	}
 
-	slice->reqs = kvcalloc(sgt->nents, sizeof(*slice->reqs), GFP_KERNEL);
+	slice->reqs = kvzalloc_objs(*slice->reqs, sgt->nents);
 	if (!slice->reqs) {
 		ret = -ENOMEM;
 		goto free_slice;
@@ -507,7 +507,7 @@ static int create_sgt(struct qaic_device *qdev, struct sg_table **sgt_out, u64 s
 		i++;
 	}
 
-	sgt = kmalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kmalloc_obj(*sgt);
 	if (!sgt) {
 		ret = -ENOMEM;
 		goto free_partial_alloc;
@@ -606,8 +606,11 @@ static const struct vm_operations_struct drm_vm_ops = {
 static int qaic_gem_object_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
 {
 	struct qaic_bo *bo = to_qaic_bo(obj);
+	unsigned long remap_start;
 	unsigned long offset = 0;
+	unsigned long remap_end;
 	struct scatterlist *sg;
+	unsigned long length;
 	int ret = 0;
 
 	if (drm_gem_is_imported(obj))
@@ -615,11 +618,27 @@ static int qaic_gem_object_mmap(struct drm_gem_object *obj, struct vm_area_struc
 
 	for (sg = bo->sgt->sgl; sg; sg = sg_next(sg)) {
 		if (sg_page(sg)) {
+			/* if sg is too large for the VMA, so truncate it to fit */
+			if (check_add_overflow(vma->vm_start, offset, &remap_start))
+				return -EINVAL;
+			if (check_add_overflow(remap_start, sg->length, &remap_end))
+				return -EINVAL;
+
+			if (remap_end > vma->vm_end) {
+				if (check_sub_overflow(vma->vm_end, remap_start, &length))
+					return -EINVAL;
+			} else {
+				length = sg->length;
+			}
+
+			if (length == 0)
+				goto out;
+
 			ret = remap_pfn_range(vma, vma->vm_start + offset, page_to_pfn(sg_page(sg)),
-					      sg->length, vma->vm_page_prot);
+					      length, vma->vm_page_prot);
 			if (ret)
 				goto out;
-			offset += sg->length;
+			offset += length;
 		}
 	}
 
@@ -653,7 +672,7 @@ static struct sg_table *qaic_get_sg_table(struct drm_gem_object *obj)
 
 	sgt_in = bo->sgt;
 
-	sgt = kmalloc(sizeof(*sgt), GFP_KERNEL);
+	sgt = kmalloc_obj(*sgt);
 	if (!sgt)
 		return ERR_PTR(-ENOMEM);
 
@@ -697,7 +716,7 @@ static struct qaic_bo *qaic_alloc_init_bo(void)
 {
 	struct qaic_bo *bo;
 
-	bo = kzalloc(sizeof(*bo), GFP_KERNEL);
+	bo = kzalloc_obj(*bo);
 	if (!bo)
 		return ERR_PTR(-ENOMEM);
 

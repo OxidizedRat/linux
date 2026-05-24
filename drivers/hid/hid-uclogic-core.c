@@ -184,7 +184,9 @@ static int uclogic_input_configured(struct hid_device *hdev,
 			suffix = "System Control";
 			break;
 		}
-	} else {
+	}
+
+	if (suffix) {
 		hi->input->name = devm_kasprintf(&hdev->dev, GFP_KERNEL,
 						 "%s %s", hdev->name, suffix);
 		if (!hi->input->name)
@@ -268,7 +270,6 @@ failure:
 	return rc;
 }
 
-#ifdef CONFIG_PM
 static int uclogic_resume(struct hid_device *hdev)
 {
 	int rc;
@@ -283,7 +284,6 @@ static int uclogic_resume(struct hid_device *hdev)
 
 	return rc;
 }
-#endif
 
 /**
  * uclogic_exec_event_hook - if the received event is hooked schedules the
@@ -636,10 +636,8 @@ static struct hid_driver uclogic_driver = {
 	.raw_event = uclogic_raw_event,
 	.input_mapping = uclogic_input_mapping,
 	.input_configured = uclogic_input_configured,
-#ifdef CONFIG_PM
-	.resume	          = uclogic_resume,
-	.reset_resume     = uclogic_resume,
-#endif
+	.resume	          = pm_ptr(uclogic_resume),
+	.reset_resume     = pm_ptr(uclogic_resume),
 };
 module_hid_driver(uclogic_driver);
 

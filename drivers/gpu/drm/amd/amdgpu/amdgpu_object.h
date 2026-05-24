@@ -96,7 +96,8 @@ struct amdgpu_bo_va {
 	 * if non-zero, cannot unmap from GPU because user queues may still access it
 	 */
 	unsigned int			queue_refcount;
-	atomic_t			userq_va_mapped;
+	/* Indicates if this buffer is mapped for any user queue. Once set, never reset. */
+	bool				userq_va_mapped;
 };
 
 struct amdgpu_bo {
@@ -168,8 +169,6 @@ static inline unsigned amdgpu_mem_type_to_domain(u32 mem_type)
 		return AMDGPU_GEM_DOMAIN_OA;
 	case AMDGPU_PL_DOORBELL:
 		return AMDGPU_GEM_DOMAIN_DOORBELL;
-	case AMDGPU_PL_MMIO_REMAP:
-		return AMDGPU_GEM_DOMAIN_MMIO_REMAP;
 	default:
 		break;
 	}

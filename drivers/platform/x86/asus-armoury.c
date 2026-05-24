@@ -370,7 +370,7 @@ static ssize_t mini_led_mode_current_value_show(struct kobject *kobj,
 	if (err)
 		return err;
 
-	mode = FIELD_GET(ASUS_MINI_LED_MODE_MASK, 0);
+	mode = FIELD_GET(ASUS_MINI_LED_MODE_MASK, mode);
 
 	for (i = 0; i < mini_led_mode_map_size; i++)
 		if (mode == mini_led_mode_map[i])
@@ -386,6 +386,7 @@ static ssize_t mini_led_mode_current_value_store(struct kobject *kobj,
 {
 	u32 *mini_led_mode_map;
 	size_t mini_led_mode_map_size;
+	char mapped_value[12];
 	u32 mode;
 	int err;
 
@@ -414,9 +415,16 @@ static ssize_t mini_led_mode_current_value_store(struct kobject *kobj,
 		return -ENODEV;
 	}
 
-	return armoury_attr_uint_store(kobj, attr, buf, count,
-				       0, mini_led_mode_map[mode],
-				       NULL, asus_armoury.mini_led_dev_id);
+	/*
+	 * armoury_attr_uint_store() parses and sends the value from the
+	 * passed buffer; hand it the mapped firmware value so the device
+	 * receives the translated mode instead of the raw index.
+	 */
+	snprintf(mapped_value, sizeof(mapped_value), "%u", mini_led_mode_map[mode]);
+
+	return armoury_attr_uint_store(kobj, attr, mapped_value, count, 0,
+				       mini_led_mode_map[mode], NULL,
+				       asus_armoury.mini_led_dev_id);
 }
 
 static ssize_t mini_led_mode_possible_values_show(struct kobject *kobj,
@@ -1005,8 +1013,7 @@ static void init_rog_tunables(void)
 	/* Initialize AC power tunables */
 	ac_limits = power_data->ac_data;
 	if (ac_limits) {
-		ac_rog_tunables = kzalloc(sizeof(*asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_AC]),
-				GFP_KERNEL);
+		ac_rog_tunables = kzalloc_obj(*asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_AC]);
 		if (!ac_rog_tunables)
 			goto err_nomem;
 
@@ -1053,8 +1060,7 @@ static void init_rog_tunables(void)
 	/* Initialize DC power tunables */
 	dc_limits = power_data->dc_data;
 	if (dc_limits) {
-		dc_rog_tunables = kzalloc(sizeof(*asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_DC]),
-					  GFP_KERNEL);
+		dc_rog_tunables = kzalloc_obj(*asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_DC]);
 		if (!dc_rog_tunables) {
 			kfree(ac_rog_tunables);
 			goto err_nomem;

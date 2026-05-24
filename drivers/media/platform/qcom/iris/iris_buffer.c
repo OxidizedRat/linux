@@ -342,7 +342,7 @@ static int iris_create_internal_buffer(struct iris_inst *inst,
 	if (!buffers->size)
 		return 0;
 
-	buffer = kzalloc(sizeof(*buffer), GFP_KERNEL);
+	buffer = kzalloc_obj(*buffer);
 	if (!buffer)
 		return -ENOMEM;
 
@@ -351,12 +351,15 @@ static int iris_create_internal_buffer(struct iris_inst *inst,
 	buffer->index = index;
 	buffer->buffer_size = buffers->size;
 	buffer->dma_attrs = DMA_ATTR_WRITE_COMBINE | DMA_ATTR_NO_KERNEL_MAPPING;
-	list_add_tail(&buffer->list, &buffers->list);
 
 	buffer->kvaddr = dma_alloc_attrs(core->dev, buffer->buffer_size,
 					 &buffer->device_addr, GFP_KERNEL, buffer->dma_attrs);
-	if (!buffer->kvaddr)
+	if (!buffer->kvaddr) {
+		kfree(buffer);
 		return -ENOMEM;
+	}
+
+	list_add_tail(&buffer->list, &buffers->list);
 
 	return 0;
 }
@@ -579,10 +582,12 @@ static int iris_release_internal_buffers(struct iris_inst *inst,
 			continue;
 		if (!(buffer->attr & BUF_ATTR_QUEUED))
 			continue;
-		ret = hfi_ops->session_release_buf(inst, buffer);
-		if (ret)
-			return ret;
 		buffer->attr |= BUF_ATTR_PENDING_RELEASE;
+		ret = hfi_ops->session_release_buf(inst, buffer);
+		if (ret) {
+			buffer->attr &= ~BUF_ATTR_PENDING_RELEASE;
+			return ret;
+		}
 	}
 
 	return 0;
