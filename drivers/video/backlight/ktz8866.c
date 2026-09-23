@@ -6,6 +6,7 @@
  */
 
 #include <linux/backlight.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -43,8 +44,13 @@
 #define LCD_BIAS_EN 0x9F
 #define PWM_HYST 0x5
 
+struct ktz8866_info {
+	bool oneplus_caihong;
+};
+
 struct ktz8866 {
 	struct i2c_client *client;
+	const struct ktz8866_info *info;
 	struct regmap *regmap;
 	bool led_on;
 	struct gpio_desc *enable_gpio;
@@ -73,6 +79,22 @@ static int ktz8866_backlight_update_status(struct backlight_device *backlight_de
 	struct ktz8866 *ktz = bl_get_data(backlight_dev);
 	unsigned int brightness = backlight_get_brightness(backlight_dev);
 
+	if (ktz->info->oneplus_caihong) {
+		ktz8866_write(ktz, BL_BRT_LSB, brightness & 0x7);
+		ktz8866_write(ktz, BL_BRT_MSB, (brightness >> 3) & 0xff);
+
+		if (!ktz->led_on && brightness > 0) {
+			msleep(20);
+			ktz8866_write(ktz, BL_EN, 0x4f);
+			ktz->led_on = true;
+		} else if (brightness == 0) {
+			ktz8866_write(ktz, BL_EN, 0x00);
+			ktz->led_on = false;
+		}
+
+		return 0;
+	}
+
 	if (!ktz->led_on && brightness > 0) {
 		ktz8866_update_bits(ktz, BL_EN, BL_EN_BIT, BL_EN_BIT);
 		ktz->led_on = true;
@@ -93,9 +115,27 @@ static const struct backlight_ops ktz8866_backlight_ops = {
 	.update_status = ktz8866_backlight_update_status,
 };
 
+static void ktz8866_init_oneplus_caihong(struct ktz8866 *ktz)
+{
+	ktz8866_write(ktz, LCD_BOOST_CFG, 0x30);
+	ktz8866_write(ktz, OUTP_CFG, 0x28);
+	ktz8866_write(ktz, OUTN_CFG, 0x28);
+	ktz8866_write(ktz, LCD_BIAS_CFG1, LCD_BIAS_EN);
+	ktz8866_write(ktz, BL_CFG1, 0xd3);
+	ktz8866_write(ktz, BL_OPTION2, 0x37);
+	ktz8866_write(ktz, BL_DIMMING, 0x44);
+	ktz8866_write(ktz, PWM_RAMP_TIME, 0xf8);
+	ktz8866_write(ktz, BL_EN, 0x0f);
+}
+
 static void ktz8866_init(struct ktz8866 *ktz)
 {
 	unsigned int val = 0;
+
+	if (ktz->info->oneplus_caihong) {
+		ktz8866_init_oneplus_caihong(ktz);
+		return;
+	}
 
 	if (!of_property_read_u32(ktz->client->dev.of_node, "current-num-sinks", &val))
 		ktz8866_write(ktz, BL_EN, BIT(val) - 1);
@@ -136,6 +176,9 @@ static int ktz8866_probe(struct i2c_client *client)
 		return -ENOMEM;
 
 	ktz->client = client;
+	ktz->info = device_get_match_data(&client->dev);
+	if (!ktz->info)
+		return -ENODEV;
 	ktz->regmap = devm_regmap_init_i2c(client, &ktz8866_regmap_config);
 	if (IS_ERR(ktz->regmap))
 		return dev_err_probe(&client->dev, PTR_ERR(ktz->regmap), "failed to init regmap\n");
@@ -156,6 +199,10 @@ static int ktz8866_probe(struct i2c_client *client)
 	props.max_brightness = MAX_BRIGHTNESS;
 	props.brightness = DEFAULT_BRIGHTNESS;
 	props.scale = BACKLIGHT_SCALE_LINEAR;
+	device_property_read_u32(&client->dev, "default-brightness",
+				 &props.brightness);
+	props.brightness = min_t(unsigned int, props.brightness,
+				 props.max_brightness);
 
 	backlight_dev = devm_backlight_device_register(&client->dev, "ktz8866-backlight",
 					&client->dev, ktz, &ktz8866_backlight_ops, &props);
@@ -166,7 +213,8 @@ static int ktz8866_probe(struct i2c_client *client)
 	ktz8866_init(ktz);
 
 	i2c_set_clientdata(client, backlight_dev);
-	backlight_update_status(backlight_dev);
+	if (!ktz->info->oneplus_caihong)
+		backlight_update_status(backlight_dev);
 
 	return 0;
 }
@@ -187,6 +235,12 @@ MODULE_DEVICE_TABLE(i2c, ktz8866_ids);
 static const struct of_device_id ktz8866_match_table[] = {
 	{
 		.compatible = "kinetic,ktz8866",
+		.data = &(const struct ktz8866_info) { },
+	}, {
+		.compatible = "oneplus,caihong-ktz8866",
+		.data = &(const struct ktz8866_info) {
+			.oneplus_caihong = true,
+		},
 	},
 	{},
 };
