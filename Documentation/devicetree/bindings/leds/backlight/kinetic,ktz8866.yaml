@@ -19,7 +19,11 @@ allOf:
 
 properties:
   compatible:
-    const: kinetic,ktz8866
+    oneOf:
+      - const: kinetic,ktz8866
+      - items:
+          - const: oneplus,caihong-ktz8866
+          - const: kinetic,ktz8866
 
   reg:
     maxItems: 1
@@ -60,7 +64,6 @@ required:
   - reg
   - vddpos-supply
   - vddneg-supply
-  - enable-gpios
 
 unevaluatedProperties: false
 
