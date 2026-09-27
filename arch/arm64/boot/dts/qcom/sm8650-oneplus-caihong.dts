@@ -133,6 +133,14 @@
 	};
 
 	reserved-memory {
+		cnss_wlan_mem: cnss-wlan-pool {
+			compatible = "shared-dma-pool";
+			alloc-ranges = <0 0xa3180000 0 0xce80000>;
+			size = <0 0x2000000>;
+			alignment = <0 0x400000>;
+			reusable;
+		};
+
 		adspslpi_mem: adspslpi@9df00000 {
 			reg = <0 0x9df00000 0 0x5280000>;
 			no-map;
@@ -809,6 +817,8 @@
 	wifi@0 {
 		compatible = "pci17cb,1107";
 		reg = <0x10000 0x0 0x0 0x0 0x0>;
+
+		memory-region = <&cnss_wlan_mem>;
 
 		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
 		vddaon-supply = <&vreg_pmu_aon_0p59>;

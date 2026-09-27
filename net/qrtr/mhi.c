@@ -23,6 +23,9 @@ static void qcom_mhi_qrtr_dl_callback(struct mhi_device *mhi_dev,
 	struct qrtr_mhi_dev *qdev = dev_get_drvdata(&mhi_dev->dev);
 	int rc;
 
+	dev_info(&mhi_dev->dev, "QRTR DL: bytes=%zu status=%d\n",
+		 mhi_res->bytes_xferd, mhi_res->transaction_status);
+
 	if (!qdev || (mhi_res->transaction_status && mhi_res->transaction_status != -ENOTCONN))
 		return;
 
@@ -60,6 +63,8 @@ static int qcom_mhi_qrtr_send(struct qrtr_endpoint *ep, struct sk_buff *skb)
 {
 	struct qrtr_mhi_dev *qdev = container_of(ep, struct qrtr_mhi_dev, ep);
 	int rc;
+
+	dev_info(&qdev->mhi_dev->dev, "QRTR UL: len=%u\n", skb->len);
 
 	if (skb->sk)
 		sock_hold(skb->sk);
@@ -122,26 +127,26 @@ static int qcom_mhi_qrtr_probe(struct mhi_device *mhi_dev,
 
 	dev_set_drvdata(&mhi_dev->dev, qdev);
 
-	/* start channels */
-	rc = mhi_prepare_for_transfer(mhi_dev);
+	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
 	if (rc)
 		return rc;
 
-	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
+	/* start channels */
+	rc = mhi_prepare_for_transfer(mhi_dev);
 	if (rc)
-		goto err_unprepare;
+		goto err_unregister;
 
 	rc = qcom_mhi_qrtr_queue_dl_buffers(mhi_dev);
 	if (rc)
 		goto err_unregister;
 
 	dev_dbg(qdev->dev, "Qualcomm MHI QRTR driver probed\n");
+	dev_info(qdev->dev, "Qualcomm MHI QRTR driver probed and endpoint registered\n");
 
 	return 0;
 
 err_unregister:
 	qrtr_endpoint_unregister(&qdev->ep);
-err_unprepare:
 	mhi_unprepare_from_transfer(mhi_dev);
 
 	return rc;

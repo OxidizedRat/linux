@@ -15,6 +15,7 @@
 #include <linux/time.h>
 #include <linux/of.h>
 #include <linux/cleanup.h>
+#include <linux/atomic.h>
 #include <linux/percpu.h>
 #include <linux/refcount.h>
 #include "core.h"
@@ -25,6 +26,8 @@
 #include "peer.h"
 #include "p2p.h"
 #include "testmode.h"
+
+static atomic_t caihong_mgmt_rx_log_count = ATOMIC_INIT(0);
 
 struct ath12k_wmi_svc_ready_parse {
 	bool wmi_svc_bitmap_done;
@@ -7267,6 +7270,17 @@ static void ath12k_mgmt_rx_event(struct ath12k_base *ab, struct sk_buff *skb)
 		return;
 	}
 
+	{
+		int log_index = atomic_inc_return(&caihong_mgmt_rx_log_count);
+
+		if (log_index <= 300)
+			ath12k_info(ab,
+				    "mgmt RX enter #%d pdev=%u chan=%u freq=%u len=%u status=%08x snr=%d rate=%u phy=%u\n",
+				    log_index, rx_ev.pdev_id, rx_ev.channel,
+				    rx_ev.chan_freq, skb->len, rx_ev.status,
+				    rx_ev.snr, rx_ev.rate, rx_ev.phy_mode);
+	}
+
 	memset(status, 0, sizeof(*status));
 
 	ath12k_dbg(ab, ATH12K_DBG_MGMT, "mgmt rx event status %08x\n",
@@ -7278,6 +7292,7 @@ static void ath12k_mgmt_rx_event(struct ath12k_base *ab, struct sk_buff *skb)
 	if (!ar) {
 		ath12k_warn(ab, "invalid pdev_id %d in mgmt_rx_event\n",
 			    rx_ev.pdev_id);
+		ath12k_info(ab, "mgmt RX dropped: no ar\n");
 		dev_kfree_skb(skb);
 		goto exit;
 	}
@@ -7286,6 +7301,9 @@ static void ath12k_mgmt_rx_event(struct ath12k_base *ab, struct sk_buff *skb)
 	    (rx_ev.status & (WMI_RX_STATUS_ERR_DECRYPT |
 			     WMI_RX_STATUS_ERR_KEY_CACHE_MISS |
 			     WMI_RX_STATUS_ERR_CRC))) {
+		ath12k_info(ab, "mgmt RX dropped: cac=%d status=%08x\n",
+			    test_bit(ATH12K_FLAG_CAC_RUNNING, &ar->dev_flags),
+			    rx_ev.status);
 		dev_kfree_skb(skb);
 		goto exit;
 	}
@@ -7306,6 +7324,8 @@ static void ath12k_mgmt_rx_event(struct ath12k_base *ab, struct sk_buff *skb)
 		 * mac80211 has been changed.
 		 */
 		WARN_ON_ONCE(1);
+		ath12k_info(ab, "mgmt RX dropped: invalid band chan=%u freq=%u\n",
+			    rx_ev.channel, rx_ev.chan_freq);
 		dev_kfree_skb(skb);
 		goto exit;
 	}
@@ -7340,6 +7360,8 @@ static void ath12k_mgmt_rx_event(struct ath12k_base *ab, struct sk_buff *skb)
 	 * firmware sends all NULL frames in this path (3-address and 4-address)
 	 */
 	if (ieee80211_is_data(hdr->frame_control) && !is_4addr_null_pkt) {
+		ath12k_info(ab, "mgmt RX dropped: data fc=%04x len=%u\n",
+			    fc, skb->len);
 		dev_kfree_skb(skb);
 		goto exit;
 	}
@@ -7351,6 +7373,7 @@ static void ath12k_mgmt_rx_event(struct ath12k_base *ab, struct sk_buff *skb)
 								 hdr->addr2);
 		if (!peer) {
 			spin_unlock_bh(&dp->dp_lock);
+			ath12k_info(ab, "mgmt RX dropped: 4addr peer not found\n");
 			dev_kfree_skb(skb);
 			goto exit;
 		}
@@ -7387,6 +7410,11 @@ static void ath12k_mgmt_rx_event(struct ath12k_base *ab, struct sk_buff *skb)
 		ath12k_mac_handle_beacon(ar, skb);
 
 send_rx:
+	ath12k_info(ab,
+		    "mgmt RX pass: len=%u fc=%04x ftype=%02x stype=%02x freq=%u band=%u signal=%d rate_idx=%u\n",
+		    skb->len, fc, fc & IEEE80211_FCTL_FTYPE,
+		    fc & IEEE80211_FCTL_STYPE, status->freq, status->band,
+		    status->signal, status->rate_idx);
 	ath12k_dbg(ab, ATH12K_DBG_MGMT,
 		   "event mgmt rx skb %p len %d ftype %02x stype %02x\n",
 		   skb, skb->len,
@@ -7508,6 +7536,12 @@ static void ath12k_scan_event(struct ath12k_base *ab, struct sk_buff *skb)
 		   le32_to_cpu(scan_ev.scan_id),
 		   le32_to_cpu(scan_ev.vdev_id),
 		   ath12k_scan_state_str(ar->scan.state), ar->scan.state);
+	ath12k_info(ab,
+		    "scan event: type=%u reason=%u freq=%u scan_id=%u vdev_id=%u state=%u\n",
+		    le32_to_cpu(scan_ev.event_type), le32_to_cpu(scan_ev.reason),
+		    le32_to_cpu(scan_ev.channel_freq),
+		    le32_to_cpu(scan_ev.scan_id), le32_to_cpu(scan_ev.vdev_id),
+		    ar->scan.state);
 
 	switch (le32_to_cpu(scan_ev.event_type)) {
 	case WMI_SCAN_EVENT_STARTED:

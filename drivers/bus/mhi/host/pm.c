@@ -17,6 +17,8 @@
 #include "internal.h"
 #include "trace.h"
 
+static bool mhi_diag_mission_transition_done;
+
 /*
  * Not all MHI state transitions are synchronous. Transitions like Linkdown,
  * SYS_ERR, and shutdown can happen anytime asynchronously. This function will
@@ -465,6 +467,9 @@ error_mission_mode:
 	mhi_cntrl->wake_put(mhi_cntrl, false);
 	read_unlock_bh(&mhi_cntrl->pm_lock);
 
+	/* Diagnostic: hold the device awake while MSI delivery is unavailable. */
+	mhi_cntrl->wake_get(mhi_cntrl, true);
+
 	return ret;
 }
 
@@ -836,6 +841,12 @@ void mhi_pm_st_worker(struct work_struct *work)
 			mhi_uevent_notify(mhi_cntrl, mhi_cntrl->ee);
 			break;
 		case DEV_ST_TRANSITION_MISSION_MODE:
+			if (mhi_diag_mission_transition_done) {
+				dev_info(&mhi_cntrl->mhi_dev->dev,
+					 "ignoring duplicate mission-mode transition\n");
+				break;
+			}
+			mhi_diag_mission_transition_done = true;
 			mhi_pm_mission_mode_transition(mhi_cntrl);
 			break;
 		case DEV_ST_TRANSITION_FP:
@@ -1274,9 +1285,19 @@ void mhi_power_down_keep_dev(struct mhi_controller *mhi_cntrl,
 }
 EXPORT_SYMBOL_GPL(mhi_power_down_keep_dev);
 
+static struct mhi_controller *mhi_diag_poll_cntrl;
+static void mhi_diag_event_poll_worker(struct work_struct *work);
+static DECLARE_WORK(mhi_diag_event_poll_work, mhi_diag_event_poll_worker);
+
 int mhi_sync_power_up(struct mhi_controller *mhi_cntrl)
 {
 	int ret = mhi_async_power_up(mhi_cntrl);
+	enum mhi_ee_type last_polled_ee = mhi_cntrl->ee;
+	enum mhi_ee_type polled_ee;
+	struct mhi_event *mhi_event;
+	struct device *dev = &mhi_cntrl->mhi_dev->dev;
+	unsigned long deadline;
+	bool mission_seen = false;
 	u32 timeout_ms;
 
 	if (ret)
@@ -1285,10 +1306,72 @@ int mhi_sync_power_up(struct mhi_controller *mhi_cntrl)
 	/* Some devices need more time to set ready during power up */
 	timeout_ms = mhi_cntrl->ready_timeout_ms ?
 		mhi_cntrl->ready_timeout_ms : mhi_cntrl->timeout_ms;
-	wait_event_timeout(mhi_cntrl->state_event,
-			   MHI_IN_MISSION_MODE(mhi_cntrl->ee) ||
-			   MHI_PM_FATAL_ERROR(mhi_cntrl->pm_state),
-			   msecs_to_jiffies(timeout_ms));
+	deadline = jiffies + msecs_to_jiffies(timeout_ms);
+
+	while (time_before(jiffies, deadline)) {
+		if (MHI_PM_FATAL_ERROR(mhi_cntrl->pm_state))
+			break;
+
+		polled_ee = mhi_get_exec_env(mhi_cntrl);
+		if (polled_ee != last_polled_ee) {
+			dev_info(dev, "polled EE transition: %d -> %d\n",
+				 last_polled_ee, polled_ee);
+			last_polled_ee = polled_ee;
+
+			switch (polled_ee) {
+			case MHI_EE_SBL:
+				mhi_queue_state_transition(mhi_cntrl,
+							   DEV_ST_TRANSITION_SBL);
+				break;
+			case MHI_EE_WFW:
+			case MHI_EE_AMSS:
+				mhi_queue_state_transition(mhi_cntrl,
+							   DEV_ST_TRANSITION_MISSION_MODE);
+				break;
+			default:
+				break;
+			}
+		}
+
+		if (MHI_IN_MISSION_MODE(mhi_cntrl->ee) && !mission_seen) {
+			mission_seen = true;
+			deadline = jiffies + msecs_to_jiffies(5000);
+			mhi_diag_poll_cntrl = mhi_cntrl;
+			schedule_work(&mhi_diag_event_poll_work);
+		}
+
+		/*
+		 * Diagnostic polling path for platforms with broken MSI
+		 * delivery.  Only poll the control ring, and only after MMIO
+		 * and the event-ring context have been initialized.
+		 */
+		if (mhi_cntrl->mhi_ctxt) {
+			for (mhi_event = mhi_cntrl->mhi_event;
+			     mhi_event < &mhi_cntrl->mhi_event[mhi_cntrl->total_ev_rings];
+			     mhi_event++) {
+				if (mhi_event->data_type == MHI_ER_CTRL &&
+				    !mhi_event->offload_ev && !mhi_event->hw_ring)
+				{
+					int processed;
+
+					spin_lock_bh(&mhi_event->lock);
+					processed = mhi_process_ctrl_ev_ring(mhi_cntrl,
+									     mhi_event,
+									     U32_MAX);
+					spin_unlock_bh(&mhi_event->lock);
+					if (processed > 0)
+						dev_info(dev,
+							 "polled %d control event(s)\n",
+							 processed);
+				}
+			}
+		}
+
+		if (mission_seen && time_after_eq(jiffies, deadline))
+			break;
+
+		msleep(100);
+	}
 
 	ret = (MHI_IN_MISSION_MODE(mhi_cntrl->ee)) ? 0 : -ETIMEDOUT;
 	if (ret)
@@ -1298,6 +1381,48 @@ int mhi_sync_power_up(struct mhi_controller *mhi_cntrl)
 }
 EXPORT_SYMBOL(mhi_sync_power_up);
 
+static void mhi_diag_event_poll_worker(struct work_struct *work)
+{
+	struct mhi_controller *mhi_cntrl = mhi_diag_poll_cntrl;
+	struct mhi_event *mhi_event;
+	struct device *dev;
+	int i;
+
+	if (!mhi_cntrl)
+		return;
+
+	dev = &mhi_cntrl->mhi_dev->dev;
+	dev_info(dev, "starting 10 minute post-mission MHI event poll\n");
+
+	for (i = 0; i < 6000; i++) {
+		if (!mhi_cntrl->mhi_ctxt ||
+		    MHI_PM_FATAL_ERROR(mhi_cntrl->pm_state))
+			break;
+
+		for (mhi_event = mhi_cntrl->mhi_event;
+		     mhi_event < &mhi_cntrl->mhi_event[mhi_cntrl->total_ev_rings];
+		     mhi_event++) {
+			int processed;
+
+			if (mhi_event->offload_ev || mhi_event->hw_ring)
+				continue;
+
+			spin_lock_bh(&mhi_event->lock);
+			processed = mhi_event->process_event(mhi_cntrl,
+							      mhi_event,
+							      U32_MAX);
+			spin_unlock_bh(&mhi_event->lock);
+			if (processed > 0)
+				dev_info(dev,
+					 "post-mission event ring %d processed %d event(s)\n",
+					 mhi_event->er_index, processed);
+		}
+
+		msleep(100);
+	}
+
+	dev_info(dev, "post-mission MHI event poll finished\n");
+}
 int mhi_force_rddm_mode(struct mhi_controller *mhi_cntrl)
 {
 	struct device *dev = &mhi_cntrl->mhi_dev->dev;

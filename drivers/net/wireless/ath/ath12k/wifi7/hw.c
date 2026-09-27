@@ -486,7 +486,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 				   BIT(NL80211_IFTYPE_P2P_GO),
 		.supports_monitor = true,
 
-		.idle_ps = true,
+		.idle_ps = false,
 		.download_calib = false,
 		.supports_suspend = true,
 		.tcl_ring_retry = false,
@@ -750,7 +750,7 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
 				   BIT(NL80211_IFTYPE_P2P_GO),
 		.supports_monitor = true,
 
-		.idle_ps = true,
+		.idle_ps = false,
 		.download_calib = false,
 		.supports_suspend = true,
 		.tcl_ring_retry = false,

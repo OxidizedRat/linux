@@ -5211,6 +5211,9 @@ void __ath12k_mac_scan_finish(struct ath12k *ar)
 
 	lockdep_assert_held(&ar->data_lock);
 
+	ath12k_info(ar->ab, "scan finish requested: state=%u roc=%u\n",
+		    ar->scan.state, ar->scan.is_roc);
+
 	switch (ar->scan.state) {
 	case ATH12K_SCAN_IDLE:
 		break;
@@ -5331,10 +5334,16 @@ static void ath12k_mac_scan_send_complete(struct ath12k *ar,
 
 	lockdep_assert_wiphy(ah->hw->wiphy);
 
+	ath12k_info(ar->ab, "cfg80211 scan completion being sent: aborted=%u\n",
+		    info->aborted);
+
 	for_each_ar(ah, partner_ar, i)
 		if (partner_ar != ar &&
-		    partner_ar->scan.state == ATH12K_SCAN_RUNNING)
+		    partner_ar->scan.state == ATH12K_SCAN_RUNNING) {
+			ath12k_info(ar->ab,
+				    "cfg80211 scan completion deferred for running partner\n");
 			return;
+		}
 
 	ieee80211_scan_completed(ah->hw, info);
 }
@@ -5349,6 +5358,10 @@ static void ath12k_scan_vdev_clean_work(struct wiphy *wiphy, struct wiphy_work *
 	lockdep_assert_wiphy(wiphy);
 
 	arvif = ar->scan.arvif;
+	ath12k_info(ar->ab,
+		    "scan vdev clean work: state=%u started=%u roc=%u present=%d\n",
+		    ar->scan.state, arvif ? arvif->is_started : 0,
+		    ar->scan.is_roc, !!arvif);
 
 	/* The scan vdev has already been deleted. This can occur when a
 	 * new scan request is made on the same vif with a different
@@ -5377,6 +5390,9 @@ work_complete:
 				    ATH12K_SCAN_STARTING)),
 		};
 
+		ath12k_info(ar->ab,
+			    "scan clean work sending completion: state=%u aborted=%u\n",
+			    ar->scan.state, info.aborted);
 		ath12k_mac_scan_send_complete(ar, &info);
 	}
 
@@ -5714,6 +5730,8 @@ static int ath12k_mac_initiate_hw_scan(struct ieee80211_hw *hw,
 		arg->chan_list[i] = chan_list[i]->center_freq;
 
 	ret = ath12k_start_scan(ar, arg);
+	ath12k_info(ar->ab, "scan start requested: vdev=%u chans=%u ret=%d\n",
+		    arvif->vdev_id, arg->num_chan, ret);
 	if (ret) {
 		if (ret == -EBUSY)
 			ath12k_dbg(ar->ab, ATH12K_DBG_MAC,

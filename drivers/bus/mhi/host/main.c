@@ -15,6 +15,8 @@
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include "internal.h"
+
+static bool mhi_diag_mission_ee_seen;
 #include "trace.h"
 
 int __must_check mhi_read_reg(struct mhi_controller *mhi_cntrl,
@@ -903,6 +905,22 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 
 			dev_dbg(dev, "Received EE event: %s\n",
 				TO_MHI_EXEC_STR(event));
+			if ((event == MHI_EE_SBL &&
+			     mhi_cntrl->ee == MHI_EE_SBL) ||
+			    ((event == MHI_EE_WFW || event == MHI_EE_AMSS) &&
+			     MHI_IN_MISSION_MODE(mhi_cntrl->ee))) {
+				dev_dbg(dev, "Ignoring duplicate EE event: %s\n",
+					TO_MHI_EXEC_STR(event));
+				break;
+			}
+			if ((event == MHI_EE_WFW || event == MHI_EE_AMSS) &&
+			    mhi_diag_mission_ee_seen) {
+				dev_info(dev, "ignoring repeated mission EE event: %s\n",
+					 TO_MHI_EXEC_STR(event));
+				break;
+			}
+			if (event == MHI_EE_WFW || event == MHI_EE_AMSS)
+				mhi_diag_mission_ee_seen = true;
 			switch (event) {
 			case MHI_EE_SBL:
 				st = DEV_ST_TRANSITION_SBL;
