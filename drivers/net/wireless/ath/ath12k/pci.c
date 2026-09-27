@@ -5,6 +5,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/iommu.h>
 #include <linux/msi.h>
 #include <linux/pci.h>
 #include <linux/time.h>
@@ -35,6 +36,15 @@
 #define ACCESS_ALWAYS_OFF 0xFE0
 
 static struct ath12k_pci_driver *ath12k_pci_family_drivers[ATH12K_DEVICE_FAMILY_MAX];
+static u32 caihong_msi_addr_lo;
+static u32 caihong_msi_addr_hi;
+static u16 caihong_msi_data;
+static u16 caihong_msi_control;
+static bool caihong_low_msi_alias_mapped;
+static struct ath12k_base *caihong_ce_poll_ab;
+static struct work_struct caihong_ce_poll_work;
+static void caihong_ce_poll_worker(struct work_struct *work);
+static DECLARE_WORK(caihong_ce_poll_work, caihong_ce_poll_worker);
 static const struct ath12k_msi_config msi_config_one_msi = {
 	.total_vectors = 1,
 	.total_users = 4,
@@ -782,6 +792,54 @@ static int ath12k_pci_msi_alloc(struct ath12k_pci *ab_pci)
 	if (msi_desc->pci.msi_attrib.is_64)
 		set_bit(ATH12K_PCI_FLAG_IS_MSI_64, &ab_pci->flags);
 
+	caihong_msi_addr_lo = msi_desc->msg.address_lo;
+	caihong_msi_addr_hi = msi_desc->msg.address_hi;
+	caihong_msi_data = msi_desc->msg.data;
+	pci_read_config_word(ab_pci->pdev,
+			     ab_pci->pdev->msi_cap + PCI_MSI_FLAGS,
+			     &caihong_msi_control);
+	if (!caihong_low_msi_alias_mapped) {
+		struct iommu_domain *domain;
+		phys_addr_t msi_phys;
+		dma_addr_t orig_page = caihong_msi_addr_lo & PAGE_MASK;
+		int ret;
+
+		domain = iommu_get_domain_for_dev(&ab_pci->pdev->dev);
+		if (!domain) {
+			ath12k_err(ab, "no IOMMU domain for low MSI alias\n");
+			goto skip_low_msi_alias;
+		}
+		msi_phys = iommu_iova_to_phys(domain, orig_page);
+		if (!msi_phys) {
+			ath12k_err(ab, "original MSI IOVA %pad is unmapped\n",
+				   &caihong_msi_addr_lo);
+			goto skip_low_msi_alias;
+		}
+		ret = iommu_map(domain, 0xa8fae000, msi_phys, PAGE_SIZE,
+				IOMMU_WRITE | IOMMU_MMIO | IOMMU_NOEXEC,
+				GFP_KERNEL);
+		if (ret) {
+			ath12k_err(ab, "failed to map low MSI alias: %d\n", ret);
+			goto skip_low_msi_alias;
+		}
+		caihong_low_msi_alias_mapped = true;
+		caihong_msi_addr_lo = 0xa8fae040;
+		caihong_msi_addr_hi = 0;
+		pci_write_config_dword(ab_pci->pdev,
+				       ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_LO,
+				       caihong_msi_addr_lo);
+		pci_write_config_dword(ab_pci->pdev,
+				       ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_HI,
+				       caihong_msi_addr_hi);
+		ath12k_info(ab,
+			    "mapped low MSI alias IOVA=a8fae040 phys=%pa original-page=%pad\n",
+			    &msi_phys, &orig_page);
+	}
+skip_low_msi_alias:
+	ath12k_info(ab, "saved MSI address=%08x:%08x data=%04x control=%04x\n",
+		    caihong_msi_addr_hi, caihong_msi_addr_lo,
+		    caihong_msi_data, caihong_msi_control);
+
 	ath12k_dbg(ab, ATH12K_DBG_PCI, "msi base data is %d\n", ab_pci->msi_ep_base_data);
 
 	return 0;
@@ -1147,8 +1205,33 @@ int ath12k_pci_start(struct ath12k_base *ab)
 
 	ath12k_pci_ce_irqs_enable(ab);
 	ath12k_ce_rx_post_buf(ab);
+	caihong_ce_poll_ab = ab;
+	schedule_work(&caihong_ce_poll_work);
 
 	return 0;
+}
+
+static void caihong_ce_poll_worker(struct work_struct *work)
+{
+	struct ath12k_base *ab = caihong_ce_poll_ab;
+	int i, j;
+
+	if (!ab)
+		return;
+
+	ath12k_info(ab, "starting 60 minute diagnostic CE poll\n");
+
+	for (i = 0; i < 72000; i++) {
+		if (test_bit(ATH12K_FLAG_UNREGISTERING, &ab->dev_flags))
+			break;
+
+		for (j = 0; j < ab->hw_params->ce_count; j++)
+			ath12k_ce_per_engine_service(ab, j);
+
+		msleep(50);
+	}
+
+	ath12k_info(ab, "diagnostic CE poll finished\n");
 }
 
 u32 ath12k_pci_read32(struct ath12k_base *ab, u32 offset)
@@ -1428,11 +1511,14 @@ static void ath12k_pci_coredump_download(struct ath12k_base *ab)
 int ath12k_pci_power_up(struct ath12k_base *ab)
 {
 	struct ath12k_pci *ab_pci = ath12k_pci_priv(ab);
+	u32 addr_lo, addr_hi;
+	u16 data, control;
 	int ret;
 
 	ab_pci->register_window = 0;
 	clear_bit(ATH12K_PCI_FLAG_INIT_DONE, &ab_pci->flags);
 	ath12k_pci_sw_reset(ab_pci->ab, true);
+	pci_restore_msi_state(ab_pci->pdev);
 
 	/* Disable ASPM during firmware download due to problems switching
 	 * to AMSS state.
@@ -1449,6 +1535,41 @@ int ath12k_pci_power_up(struct ath12k_base *ab)
 		ath12k_err(ab, "failed to start mhi: %d\n", ret);
 		return ret;
 	}
+
+	/* WCN7850 can lose MSI messaging across firmware download. */
+	pci_restore_msi_state(ab_pci->pdev);
+	control = caihong_msi_control | PCI_MSI_FLAGS_ENABLE;
+	pci_write_config_dword(ab_pci->pdev,
+			       ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_LO,
+			       caihong_msi_addr_lo);
+	if (test_bit(ATH12K_PCI_FLAG_IS_MSI_64, &ab_pci->flags))
+		pci_write_config_dword(ab_pci->pdev,
+				       ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_HI,
+				       caihong_msi_addr_hi);
+	pci_write_config_word(ab_pci->pdev,
+			      ab_pci->pdev->msi_cap +
+			      (test_bit(ATH12K_PCI_FLAG_IS_MSI_64, &ab_pci->flags) ?
+			       PCI_MSI_DATA_64 : PCI_MSI_DATA_32),
+			      caihong_msi_data);
+	pci_write_config_word(ab_pci->pdev,
+			      ab_pci->pdev->msi_cap + PCI_MSI_FLAGS,
+			      control);
+	pci_read_config_dword(ab_pci->pdev,
+			      ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_LO,
+			      &addr_lo);
+	pci_read_config_dword(ab_pci->pdev,
+			      ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_HI,
+			      &addr_hi);
+	pci_read_config_word(ab_pci->pdev,
+			     ab_pci->pdev->msi_cap +
+			     (test_bit(ATH12K_PCI_FLAG_IS_MSI_64, &ab_pci->flags) ?
+			      PCI_MSI_DATA_64 : PCI_MSI_DATA_32),
+			     &data);
+	pci_read_config_word(ab_pci->pdev,
+			     ab_pci->pdev->msi_cap + PCI_MSI_FLAGS,
+			     &control);
+	ath12k_info(ab, "post-MHI MSI readback address=%08x:%08x data=%04x control=%04x\n",
+		    addr_hi, addr_lo, data, control);
 
 	if (ab->static_window_map)
 		ath12k_pci_select_static_window(ab_pci);
