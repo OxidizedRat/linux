@@ -99,6 +99,7 @@ struct mhi_buf {
 	void *buf;
 	const char *name;
 	dma_addr_t dma_addr;
+	dma_addr_t orig_dma_addr;
 	size_t len;
 };
 
