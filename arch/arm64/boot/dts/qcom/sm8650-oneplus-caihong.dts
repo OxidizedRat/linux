@@ -624,6 +624,14 @@
 	status = "okay";
 };
 
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8650/Oneplus/caihong/gen70900_zap.mbn";
+};
+
 &i2c_master_hub_0 {
 	status = "okay";
 };
