@@ -1341,8 +1341,8 @@ int mhi_sync_power_up(struct mhi_controller *mhi_cntrl)
 		}
 
 		/*
-		 * Diagnostic polling path for platforms with broken MSI
-		 * delivery.  Only poll the control ring, and only after MMIO
+		 * Polling path for platforms with broken MSI delivery.
+		 * Only poll the control ring, and only after MMIO
 		 * and the event-ring context have been initialized.
 		 */
 		if (mhi_cntrl->mhi_ctxt) {
@@ -1360,9 +1360,9 @@ int mhi_sync_power_up(struct mhi_controller *mhi_cntrl)
 									     U32_MAX);
 					spin_unlock_bh(&mhi_event->lock);
 					if (processed > 0)
-						dev_info(dev,
-							 "polled %d control event(s)\n",
-							 processed);
+						dev_dbg(dev,
+							"polled %d control event(s)\n",
+							processed);
 				}
 			}
 		}
@@ -1385,14 +1385,10 @@ static void mhi_diag_event_poll_worker(struct work_struct *work)
 {
 	struct mhi_controller *mhi_cntrl = mhi_diag_poll_cntrl;
 	struct mhi_event *mhi_event;
-	struct device *dev;
 	int i;
 
 	if (!mhi_cntrl)
 		return;
-
-	dev = &mhi_cntrl->mhi_dev->dev;
-	dev_info(dev, "starting 10 minute post-mission MHI event poll\n");
 
 	for (i = 0; i < 6000; i++) {
 		if (!mhi_cntrl->mhi_ctxt ||
@@ -1402,26 +1398,16 @@ static void mhi_diag_event_poll_worker(struct work_struct *work)
 		for (mhi_event = mhi_cntrl->mhi_event;
 		     mhi_event < &mhi_cntrl->mhi_event[mhi_cntrl->total_ev_rings];
 		     mhi_event++) {
-			int processed;
-
 			if (mhi_event->offload_ev || mhi_event->hw_ring)
 				continue;
 
 			spin_lock_bh(&mhi_event->lock);
-			processed = mhi_event->process_event(mhi_cntrl,
-							      mhi_event,
-							      U32_MAX);
+			mhi_event->process_event(mhi_cntrl, mhi_event, U32_MAX);
 			spin_unlock_bh(&mhi_event->lock);
-			if (processed > 0)
-				dev_info(dev,
-					 "post-mission event ring %d processed %d event(s)\n",
-					 mhi_event->er_index, processed);
 		}
 
 		msleep(100);
 	}
-
-	dev_info(dev, "post-mission MHI event poll finished\n");
 }
 int mhi_force_rddm_mode(struct mhi_controller *mhi_cntrl)
 {
