@@ -449,6 +449,7 @@ static const u8 sm8350_bat_prop_map[] = {
 	[POWER_SUPPLY_PROP_TEMP] = BATT_TEMP,
 	[POWER_SUPPLY_PROP_TECHNOLOGY] = BATT_TECHNOLOGY,
 	[POWER_SUPPLY_PROP_CHARGE_COUNTER] =  BATT_CHG_COUNTER,
+	[POWER_SUPPLY_PROP_CHARGE_NOW] = BATT_CHG_COUNTER,
 	[POWER_SUPPLY_PROP_CYCLE_COUNT] = BATT_CYCLE_COUNT,
 	[POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN] =  BATT_CHG_FULL_DESIGN,
 	[POWER_SUPPLY_PROP_CHARGE_FULL] = BATT_CHG_FULL,
@@ -596,7 +597,11 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		if (unit != QCOM_BATTMGR_UNIT_mAh)
 			return -ENODATA;
-		val->intval = battmgr->status.capacity;
+		/* Oplus firmware: the charge counter is the remaining charge */
+		if (battmgr->oplus)
+			val->intval = battmgr->info.charge_count;
+		else
+			val->intval = battmgr->status.capacity;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
 		val->intval = battmgr->info.charge_count;
@@ -950,6 +955,7 @@ static const enum power_supply_property oplus_bat_props[] = {
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
@@ -1723,6 +1729,9 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 	init_completion(&battmgr->ack);
 
 	battmgr->oplus = of_machine_is_compatible("oneplus,caihong");
+	/* Oplus firmware reports capacities in uAh; there is no unit query */
+	if (battmgr->oplus)
+		battmgr->unit = QCOM_BATTMGR_UNIT_mAh;
 
 	match = of_match_device(qcom_battmgr_of_variants, dev->parent);
 	if (match)
