@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/nvmem-consumer.h>
+#include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/power_supply.h>
 #include <linux/property.h>
@@ -74,6 +75,14 @@ enum qcom_battmgr_variant {
 #define BATT_CHG_CTRL_EN		24
 #define BATT_CHG_CTRL_START_THR		25
 #define BATT_CHG_CTRL_END_THR		26
+
+/*
+ * Oplus (OnePlus) firmware replaces the charge control properties from 24 on
+ * with its own. 24 is a charging enable that reads back as 1 after the ADSP
+ * boots, but the firmware keeps the charger disabled until the host writes it
+ * 0 and then 1.
+ */
+#define OPLUS_BATT_CHG_EN		24
 
 #define BATTMGR_USB_PROPERTY_GET	0x32
 #define BATTMGR_USB_PROPERTY_SET	0x33
@@ -313,6 +322,7 @@ struct qcom_battmgr {
 	struct pmic_glink_client *client;
 
 	enum qcom_battmgr_variant variant;
+	bool oplus;
 
 	struct power_supply *ac_psy;
 	struct power_supply *bat_psy;
@@ -561,6 +571,9 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		val->intval = battmgr->status.current_now;
+		/* Oplus firmware reports charging current as negative */
+		if (battmgr->oplus)
+			val->intval = -val->intval;
 		break;
 	case POWER_SUPPLY_PROP_POWER_NOW:
 		val->intval = battmgr->status.power_now;
@@ -919,6 +932,40 @@ static const enum power_supply_property sm8550_bat_props[] = {
 	POWER_SUPPLY_PROP_POWER_NOW,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
+};
+
+/*
+ * Oplus firmware: no meaningful health (always "overheat") or power_now, and
+ * the charge control properties are reused for other purposes.
+ */
+static const enum power_supply_property oplus_bat_props[] = {
+	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_PRESENT,
+	POWER_SUPPLY_PROP_CHARGE_TYPE,
+	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_VOLTAGE_OCV,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_VOLTAGE_MAX,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+	POWER_SUPPLY_PROP_CYCLE_COUNT,
+	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_FULL,
+	POWER_SUPPLY_PROP_MODEL_NAME,
+	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
+	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
+	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
+	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
+};
+
+static const struct power_supply_desc oplus_bat_psy_desc = {
+	.name = "qcom-battmgr-bat",
+	.type = POWER_SUPPLY_TYPE_BATTERY,
+	.properties = oplus_bat_props,
+	.num_properties = ARRAY_SIZE(oplus_bat_props),
+	.get_property = qcom_battmgr_bat_get_property,
 };
 
 static const struct power_supply_desc sm8550_bat_psy_desc = {
@@ -1558,6 +1605,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
 		break;
 	case BATTMGR_REQUEST_NOTIFICATION:
 	case BATTMGR_CHG_CTRL_LIMIT_EN:
+	case BATTMGR_BAT_PROPERTY_SET:
 		battmgr->error = 0;
 		break;
 	default:
@@ -1597,6 +1645,18 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
 	ret = qcom_battmgr_request(battmgr, &req, sizeof(req));
 	if (ret)
 		dev_err(battmgr->dev, "failed to request power notifications\n");
+
+	if (battmgr->oplus) {
+		mutex_lock(&battmgr->lock);
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
+						    OPLUS_BATT_CHG_EN, 0);
+		if (!ret)
+			ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
+							    OPLUS_BATT_CHG_EN, 1);
+		mutex_unlock(&battmgr->lock);
+		if (ret)
+			dev_err(battmgr->dev, "failed to enable charging: %d\n", ret);
+	}
 }
 
 static void qcom_battmgr_pdr_notify(void *priv, int state)
@@ -1652,6 +1712,8 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 	mutex_init(&battmgr->lock);
 	init_completion(&battmgr->ack);
 
+	battmgr->oplus = of_machine_is_compatible("oneplus,caihong");
+
 	match = of_match_device(qcom_battmgr_of_variants, dev->parent);
 	if (match)
 		battmgr->variant = (unsigned long)match->data;
@@ -1690,7 +1752,9 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 			return dev_err_probe(dev, PTR_ERR(battmgr->wls_psy),
 					     "failed to register wireless charing power supply\n");
 	} else {
-		if (battmgr->variant == QCOM_BATTMGR_SM8550)
+		if (battmgr->oplus)
+			psy_desc = &oplus_bat_psy_desc;
+		else if (battmgr->variant == QCOM_BATTMGR_SM8550)
 			psy_desc = &sm8550_bat_psy_desc;
 		else
 			psy_desc = &sm8350_bat_psy_desc;
