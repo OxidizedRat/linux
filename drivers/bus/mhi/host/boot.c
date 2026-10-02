@@ -221,7 +221,6 @@ static int mhi_fw_load_bhie(struct mhi_controller *mhi_cntrl,
 	rwlock_t *pm_lock = &mhi_cntrl->pm_lock;
 	u32 tx_status, sequence_id;
 	unsigned long deadline;
-	unsigned int poll_ms = 0;
 	int ret;
 
 	read_lock_bh(pm_lock);
@@ -248,7 +247,7 @@ static int mhi_fw_load_bhie(struct mhi_controller *mhi_cntrl,
 	if (ret)
 		return ret;
 
-	/* Poll BHIE as a diagnostic for missing completion interrupts. */
+	/* Poll BHIE for completion; completion interrupts may not arrive. */
 	tx_status = 0;
 	ret = 1;
 	deadline = jiffies + msecs_to_jiffies(mhi_cntrl->timeout_ms);
@@ -256,8 +255,9 @@ static int mhi_fw_load_bhie(struct mhi_controller *mhi_cntrl,
 		if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 			break;
 
-		mhi_read_reg_field(mhi_cntrl, base, BHIE_TXVECSTATUS_OFFS,
-				   BHIE_TXVECSTATUS_STATUS_BMSK, &tx_status);
+		if (mhi_read_reg_field(mhi_cntrl, base, BHIE_TXVECSTATUS_OFFS,
+				       BHIE_TXVECSTATUS_STATUS_BMSK, &tx_status))
+			tx_status = 0;
 		if (tx_status)
 			break;
 
@@ -267,13 +267,9 @@ static int mhi_fw_load_bhie(struct mhi_controller *mhi_cntrl,
 		}
 
 		msleep(100);
-		poll_ms += 100;
-		if (!(poll_ms % 5000))
-			dev_info(dev, "BHIE poll heartbeat: elapsed=%u status=%x pm_state=%lx\n",
-				 poll_ms, tx_status, mhi_cntrl->pm_state);
 	}
-	dev_info(dev, "BHIE transfer result: wait=%d session=%u status=%x pm_state=%lx\n",
-		 ret, sequence_id, tx_status, mhi_cntrl->pm_state);
+	dev_dbg(dev, "BHIE transfer result: wait=%d session=%u status=%x pm_state=%x\n",
+		ret, sequence_id, tx_status, mhi_cntrl->pm_state);
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
 	    tx_status != BHIE_TXVECSTATUS_STATUS_XFER_COMPL)
 		return -EIO;
@@ -287,10 +283,8 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	struct device *dev = &mhi_cntrl->mhi_dev->dev;
 	rwlock_t *pm_lock = &mhi_cntrl->pm_lock;
 	void __iomem *base = mhi_cntrl->bhi;
-	u32 tx_status, session_id;
-	u32 last_status = 0;
+	u32 tx_status = 0, session_id = 0;
 	unsigned long deadline;
-	unsigned int poll_ms = 0;
 	int ret;
 
 	read_lock_bh(pm_lock);
@@ -302,9 +296,6 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	session_id = MHI_RANDOM_U32_NONZERO(BHI_TXDB_SEQNUM_BMSK);
 	dev_dbg(dev, "Starting image download via BHI. Session ID: %u\n",
 		session_id);
-	dev_info(dev, "BHI transfer start: session=%u dma=%pad size=%zu pm_state=%lx\n",
-		 session_id, &mhi_buf->dma_addr, mhi_buf->len,
-		 mhi_cntrl->pm_state);
 	mhi_write_reg(mhi_cntrl, base, BHI_STATUS, 0);
 	mhi_write_reg(mhi_cntrl, base, BHI_IMGADDR_HIGH, upper_32_bits(mhi_buf->dma_addr));
 	mhi_write_reg(mhi_cntrl, base, BHI_IMGADDR_LOW, lower_32_bits(mhi_buf->dma_addr));
@@ -312,7 +303,7 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	mhi_write_reg(mhi_cntrl, base, BHI_IMGTXDB, session_id);
 	read_unlock_bh(pm_lock);
 
-	/* Poll BHI as a diagnostic for missing completion interrupts. */
+	/* Poll BHI for completion; completion interrupts may not arrive. */
 	tx_status = 0;
 	ret = 1;
 	deadline = jiffies + msecs_to_jiffies(mhi_cntrl->timeout_ms);
@@ -320,8 +311,9 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 		if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 			break;
 
-		mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
-				   BHI_STATUS_MASK, &tx_status);
+		if (mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
+				       BHI_STATUS_MASK, &tx_status))
+			tx_status = 0;
 		if (tx_status)
 			break;
 
@@ -331,33 +323,9 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 		}
 
 		msleep(100);
-		poll_ms += 100;
-
-		if (tx_status != last_status) {
-			u32 exec_env = U32_MAX, errcode = U32_MAX, dbg1 = U32_MAX;
-
-			mhi_read_reg(mhi_cntrl, base, BHI_EXECENV, &exec_env);
-			mhi_read_reg(mhi_cntrl, base, BHI_ERRCODE, &errcode);
-			mhi_read_reg(mhi_cntrl, base, BHI_ERRDBG1, &dbg1);
-			dev_info(dev, "BHI poll: elapsed=%u status=%x exec_env=%x errcode=%x dbg1=%x pm_state=%lx\n",
-				 poll_ms, tx_status, exec_env, errcode, dbg1,
-				 mhi_cntrl->pm_state);
-			last_status = tx_status;
-		}
-
-		if (!(poll_ms % 5000)) {
-			u32 exec_env = U32_MAX, errcode = U32_MAX, dbg1 = U32_MAX;
-
-			mhi_read_reg(mhi_cntrl, base, BHI_EXECENV, &exec_env);
-			mhi_read_reg(mhi_cntrl, base, BHI_ERRCODE, &errcode);
-			mhi_read_reg(mhi_cntrl, base, BHI_ERRDBG1, &dbg1);
-			dev_info(dev, "BHI poll heartbeat: elapsed=%u status=%x exec_env=%x errcode=%x dbg1=%x pm_state=%lx\n",
-				 poll_ms, tx_status, exec_env, errcode, dbg1,
-				 mhi_cntrl->pm_state);
-		}
 	}
-	dev_info(dev, "BHI transfer result: wait=%d session=%u status=%x pm_state=%lx\n",
-		 ret, session_id, tx_status, mhi_cntrl->pm_state);
+	dev_dbg(dev, "BHI transfer result: wait=%d session=%u status=%x pm_state=%x\n",
+		ret, session_id, tx_status, mhi_cntrl->pm_state);
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 		goto invalid_pm_state;
 
@@ -370,18 +338,6 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	return (!ret) ? -ETIMEDOUT : 0;
 
 invalid_pm_state:
-	{
-		u32 exec_env = U32_MAX, errcode = U32_MAX, dbg1 = U32_MAX;
-		u32 mhi_status = U32_MAX;
-
-		mhi_read_reg(mhi_cntrl, base, BHI_EXECENV, &exec_env);
-		mhi_read_reg(mhi_cntrl, base, BHI_ERRCODE, &errcode);
-		mhi_read_reg(mhi_cntrl, base, BHI_ERRDBG1, &dbg1);
-		mhi_read_reg(mhi_cntrl, mhi_cntrl->regs, MHISTATUS, &mhi_status);
-		dev_err(dev, "BHI invalid state: session=%u status=%x pm_state=%x exec_env=%x errcode=%x dbg1=%x mhi_status=%x\n",
-			session_id, tx_status, mhi_cntrl->pm_state, exec_env,
-			errcode, dbg1, mhi_status);
-	}
 
 	return -EIO;
 }
@@ -450,8 +406,8 @@ static int mhi_alloc_bhi_buffer(struct mhi_controller *mhi_cntrl,
 		if (!ret)
 			mhi_buf->buf = page_address(pfn_to_page(PHYS_PFN(CAIHONG_WCN_BHI_TEST_PHYS)));
 		else
-			dev_info(&mhi_cntrl->mhi_dev->dev,
-				 "low BHI pool unavailable: %d\n", ret);
+			dev_dbg(&mhi_cntrl->mhi_dev->dev,
+				"low BHI pool unavailable: %d\n", ret);
 	}
 
 	if (!mhi_buf->buf)
@@ -476,10 +432,10 @@ static int mhi_alloc_bhi_buffer(struct mhi_controller *mhi_cntrl,
 			phys = virt_to_phys(mhi_buf->buf);
 		mhi_buf->orig_dma_addr = mhi_buf->dma_addr;
 		mapped = iommu_iova_to_phys(domain, CAIHONG_WCN_BHI_IOVA);
-		dev_info(&mhi_cntrl->mhi_dev->dev,
-			 "fixed BHI IOVA mapping probe: iova=%pad phys=%pa mapped=%pa orig_dma=%pad\n",
-			 &(dma_addr_t){ CAIHONG_WCN_BHI_IOVA }, &phys, &mapped,
-			 &mhi_buf->orig_dma_addr);
+		dev_dbg(&mhi_cntrl->mhi_dev->dev,
+			"fixed BHI IOVA mapping probe: iova=%pad phys=%pa mapped=%pa orig_dma=%pad\n",
+			&(dma_addr_t){ CAIHONG_WCN_BHI_IOVA }, &phys, &mapped,
+			&mhi_buf->orig_dma_addr);
 
 		if (!mapped) {
 			ret = iommu_map(domain, CAIHONG_WCN_BHI_IOVA, phys,
@@ -487,16 +443,16 @@ static int mhi_alloc_bhi_buffer(struct mhi_controller *mhi_cntrl,
 					IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE,
 					GFP_KERNEL);
 			if (ret) {
-				dev_info(&mhi_cntrl->mhi_dev->dev,
-					 "fixed BHI IOVA map failed: %d\n", ret);
+				dev_err(&mhi_cntrl->mhi_dev->dev,
+					"fixed BHI IOVA map failed: %d\n", ret);
 				goto error_alloc_segment;
 			}
 			mhi_buf->dma_addr = CAIHONG_WCN_BHI_IOVA;
 		} else if (mapped == phys) {
 			mhi_buf->dma_addr = CAIHONG_WCN_BHI_IOVA;
 		} else {
-			dev_info(&mhi_cntrl->mhi_dev->dev,
-				 "fixed BHI IOVA mismatch\n");
+			dev_err(&mhi_cntrl->mhi_dev->dev,
+				"fixed BHI IOVA mismatch\n");
 			goto error_alloc_segment;
 		}
 	}

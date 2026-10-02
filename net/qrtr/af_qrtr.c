@@ -585,7 +585,6 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 	struct sockaddr_qrtr dst = { AF_QIPCRTR, 0, QRTR_PORT_CTRL };
 	struct qrtr_ctrl_pkt *pkt;
 	struct sk_buff *skb;
-	int ret;
 
 	if (!ep || !ep->xmit)
 		return -EINVAL;
@@ -615,9 +614,7 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 	skb = qrtr_alloc_ctrl_packet(&pkt, GFP_KERNEL);
 	if (skb) {
 		pkt->cmd = cpu_to_le32(QRTR_TYPE_HELLO);
-		ret = qrtr_node_enqueue(node, skb, QRTR_TYPE_HELLO,
-					 &src, &dst);
-		pr_info("qrtr endpoint %x: sent hello: %d\n", node->nid, ret);
+		qrtr_node_enqueue(node, skb, QRTR_TYPE_HELLO, &src, &dst);
 	}
 
 	return 0;

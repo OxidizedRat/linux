@@ -831,14 +831,15 @@ static int ath12k_pci_msi_alloc(struct ath12k_pci *ab_pci)
 		pci_write_config_dword(ab_pci->pdev,
 				       ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_HI,
 				       caihong_msi_addr_hi);
-		ath12k_info(ab,
-			    "mapped low MSI alias IOVA=a8fae040 phys=%pa original-page=%pad\n",
-			    &msi_phys, &orig_page);
+		ath12k_dbg(ab, ATH12K_DBG_PCI,
+			   "mapped low MSI alias IOVA=a8fae040 phys=%pa original-page=%pad\n",
+			   &msi_phys, &orig_page);
 	}
 skip_low_msi_alias:
-	ath12k_info(ab, "saved MSI address=%08x:%08x data=%04x control=%04x\n",
-		    caihong_msi_addr_hi, caihong_msi_addr_lo,
-		    caihong_msi_data, caihong_msi_control);
+	ath12k_dbg(ab, ATH12K_DBG_PCI,
+		   "saved MSI address=%08x:%08x data=%04x control=%04x\n",
+		   caihong_msi_addr_hi, caihong_msi_addr_lo,
+		   caihong_msi_data, caihong_msi_control);
 
 	ath12k_dbg(ab, ATH12K_DBG_PCI, "msi base data is %d\n", ab_pci->msi_ep_base_data);
 
@@ -1214,12 +1215,12 @@ int ath12k_pci_start(struct ath12k_base *ab)
 static void caihong_ce_poll_worker(struct work_struct *work)
 {
 	struct ath12k_base *ab = caihong_ce_poll_ab;
-	int i, j;
+	int i, j, k;
 
 	if (!ab)
 		return;
 
-	ath12k_info(ab, "starting 60 minute diagnostic CE poll\n");
+	ath12k_info(ab, "starting CE/srng poll work\n");
 
 	for (i = 0; i < 72000; i++) {
 		if (test_bit(ATH12K_FLAG_UNREGISTERING, &ab->dev_flags))
@@ -1228,10 +1229,31 @@ static void caihong_ce_poll_worker(struct work_struct *work)
 		for (j = 0; j < ab->hw_params->ce_count; j++)
 			ath12k_ce_per_engine_service(ab, j);
 
+		if (test_bit(ATH12K_FLAG_EXT_IRQ_ENABLED, &ab->dev_flags)) {
+			for (j = 0; j < ATH12K_EXT_IRQ_GRP_NUM_MAX; j++) {
+				struct ath12k_ext_irq_grp *irq_grp = &ab->ext_irq_grp[j];
+
+				if (!irq_grp->num_irq || !irq_grp->napi_enabled)
+					continue;
+
+				/* Mirror ath12k_pci_ext_interrupt_handler():
+				 * the NAPI poll re-enables the group irqs on
+				 * completion, so keep the irq disable depth
+				 * balanced. Undo if the poll was already
+				 * scheduled from a previous iteration.
+				 */
+				for (k = 0; k < irq_grp->num_irq; k++)
+					disable_irq_nosync(ab->irq_num[irq_grp->irqs[k]]);
+
+				if (!napi_schedule(&irq_grp->napi)) {
+					for (k = 0; k < irq_grp->num_irq; k++)
+						enable_irq(ab->irq_num[irq_grp->irqs[k]]);
+				}
+			}
+		}
+
 		msleep(50);
 	}
-
-	ath12k_info(ab, "diagnostic CE poll finished\n");
 }
 
 u32 ath12k_pci_read32(struct ath12k_base *ab, u32 offset)
@@ -1511,8 +1533,7 @@ static void ath12k_pci_coredump_download(struct ath12k_base *ab)
 int ath12k_pci_power_up(struct ath12k_base *ab)
 {
 	struct ath12k_pci *ab_pci = ath12k_pci_priv(ab);
-	u32 addr_lo, addr_hi;
-	u16 data, control;
+	u16 control;
 	int ret;
 
 	ab_pci->register_window = 0;
@@ -1554,22 +1575,6 @@ int ath12k_pci_power_up(struct ath12k_base *ab)
 	pci_write_config_word(ab_pci->pdev,
 			      ab_pci->pdev->msi_cap + PCI_MSI_FLAGS,
 			      control);
-	pci_read_config_dword(ab_pci->pdev,
-			      ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_LO,
-			      &addr_lo);
-	pci_read_config_dword(ab_pci->pdev,
-			      ab_pci->pdev->msi_cap + PCI_MSI_ADDRESS_HI,
-			      &addr_hi);
-	pci_read_config_word(ab_pci->pdev,
-			     ab_pci->pdev->msi_cap +
-			     (test_bit(ATH12K_PCI_FLAG_IS_MSI_64, &ab_pci->flags) ?
-			      PCI_MSI_DATA_64 : PCI_MSI_DATA_32),
-			     &data);
-	pci_read_config_word(ab_pci->pdev,
-			     ab_pci->pdev->msi_cap + PCI_MSI_FLAGS,
-			     &control);
-	ath12k_info(ab, "post-MHI MSI readback address=%08x:%08x data=%04x control=%04x\n",
-		    addr_hi, addr_lo, data, control);
 
 	if (ab->static_window_map)
 		ath12k_pci_select_static_window(ab_pci);
