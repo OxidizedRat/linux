@@ -915,8 +915,8 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 			}
 			if ((event == MHI_EE_WFW || event == MHI_EE_AMSS) &&
 			    mhi_diag_mission_ee_seen) {
-				dev_info(dev, "ignoring repeated mission EE event: %s\n",
-					 TO_MHI_EXEC_STR(event));
+				dev_dbg(dev, "ignoring repeated mission EE event: %s\n",
+					TO_MHI_EXEC_STR(event));
 				break;
 			}
 			if (event == MHI_EE_WFW || event == MHI_EE_AMSS)
