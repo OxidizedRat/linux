@@ -1265,6 +1265,16 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
 		power_supply_changed(battmgr->wls_psy);
 		break;
 	default:
+		/*
+		 * Oplus firmware adds its own events (plug-in, charger type
+		 * detection, Type-C changes, ...); treat them as a status change.
+		 */
+		if (battmgr->oplus) {
+			dev_dbg(battmgr->dev, "oplus notification: %#x\n", notification);
+			power_supply_changed(battmgr->bat_psy);
+			power_supply_changed(battmgr->usb_psy);
+			break;
+		}
 		dev_err(battmgr->dev, "unknown notification: %#x\n", notification);
 		break;
 	}
