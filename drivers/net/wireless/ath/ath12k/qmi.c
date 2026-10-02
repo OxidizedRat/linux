@@ -3891,9 +3891,6 @@ static int ath12k_qmi_ops_new_server(struct qmi_handle *qmi_hdl,
 	struct sockaddr_qrtr *sq = &qmi->sq;
 	int ret;
 
-	ath12k_info(ab, "qmi WLFW service arrived: node=%u port=%u instance=%u\n",
-		    service->node, service->port, service->instance);
-
 	sq->sq_family = AF_QIPCRTR;
 	sq->sq_node = service->node;
 	sq->sq_port = service->port;
@@ -3906,7 +3903,6 @@ static int ath12k_qmi_ops_new_server(struct qmi_handle *qmi_hdl,
 	}
 
 	ath12k_dbg(ab, ATH12K_DBG_QMI, "qmi wifi fw qmi service connected\n");
-	ath12k_info(ab, "qmi WLFW service connected\n");
 	ath12k_qmi_driver_event_post(qmi, ATH12K_QMI_EVENT_SERVER_ARRIVE, NULL);
 
 	return ret;
@@ -4044,9 +4040,6 @@ int ath12k_qmi_init_service(struct ath12k_base *ab)
 	ret = qmi_add_lookup(&ab->qmi.handle, QMI_SERVICE_ID_WLFW,
 			     ATH12K_QMI_WLFW_SERVICE_VERS_V01,
 			     ab->qmi.service_ins_id);
-	ath12k_info(ab, "qmi WLFW lookup added: service=%u version=%u instance=%u ret=%d\n",
-		    QMI_SERVICE_ID_WLFW, ATH12K_QMI_WLFW_SERVICE_VERS_V01,
-		    ab->qmi.service_ins_id, ret);
 	if (ret < 0) {
 		ath12k_warn(ab, "failed to add qmi lookup\n");
 		destroy_workqueue(ab->qmi.event_wq);

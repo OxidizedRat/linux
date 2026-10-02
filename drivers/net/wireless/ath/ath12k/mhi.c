@@ -141,8 +141,6 @@ static void ath12k_mhi_op_status_cb(struct mhi_controller *mhi_cntrl,
 	struct ath12k_base *ab = dev_get_drvdata(mhi_cntrl->cntrl_dev);
 	struct ath12k_pci *ab_pci = ath12k_pci_priv(ab);
 
-	ath12k_info(ab, "mhi notify status reason %s\n",
-		    ath12k_mhi_op_callback_to_str(cb));
 	ath12k_dbg(ab, ATH12K_DBG_BOOT, "mhi notify status reason %s\n",
 		   ath12k_mhi_op_callback_to_str(cb));
 
