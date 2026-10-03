@@ -77,6 +77,7 @@ struct pmic_glink_ucsi {
 	spinlock_t state_lock;
 	bool ucsi_registered;
 	bool pd_running;
+	bool suspended;
 
 	u8 read_buf[UCSI_BUF_V2_SIZE];
 };
@@ -307,6 +308,16 @@ static void pmic_glink_ucsi_notify(struct work_struct *work)
 		return;
 	}
 
+	/*
+	 * The firmware keeps reporting cable changes during system suspend.
+	 * Handling them then would drive the Type-C switches and the USB role
+	 * while their controllers (I2C, dwc3) are suspended, which hangs the
+	 * SoC. Only complete commands now; ucsi_resume() re-reads the
+	 * connector state once everything is back.
+	 */
+	if (READ_ONCE(ucsi->suspended))
+		cci &= ~GENMASK(7, 1);
+
 	ucsi_notify_common(ucsi->ucsi, cci);
 }
 
@@ -471,6 +482,31 @@ static void pmic_glink_ucsi_remove(struct auxiliary_device *adev)
 	ucsi_unregister(ucsi->ucsi);
 }
 
+static int pmic_glink_ucsi_prepare(struct device *dev)
+{
+	struct pmic_glink_ucsi *ucsi = dev_get_drvdata(dev);
+
+	WRITE_ONCE(ucsi->suspended, true);
+	if (ucsi->ucsi_registered)
+		ucsi_suspend(ucsi->ucsi);
+
+	return 0;
+}
+
+static void pmic_glink_ucsi_complete(struct device *dev)
+{
+	struct pmic_glink_ucsi *ucsi = dev_get_drvdata(dev);
+
+	WRITE_ONCE(ucsi->suspended, false);
+	if (ucsi->ucsi_registered)
+		ucsi_resume(ucsi->ucsi);
+}
+
+static const struct dev_pm_ops pmic_glink_ucsi_pm_ops = {
+	.prepare = pmic_glink_ucsi_prepare,
+	.complete = pmic_glink_ucsi_complete,
+};
+
 static const struct auxiliary_device_id pmic_glink_ucsi_id_table[] = {
 	{ .name = "pmic_glink.ucsi", },
 	{},
@@ -482,6 +518,9 @@ static struct auxiliary_driver pmic_glink_ucsi_driver = {
 	.probe = pmic_glink_ucsi_probe,
 	.remove = pmic_glink_ucsi_remove,
 	.id_table = pmic_glink_ucsi_id_table,
+	.driver = {
+		.pm = pm_sleep_ptr(&pmic_glink_ucsi_pm_ops),
+	},
 };
 
 module_auxiliary_driver(pmic_glink_ucsi_driver);
