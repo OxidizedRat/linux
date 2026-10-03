@@ -326,6 +326,15 @@
 
 #define AW88261_TDM_BCK_UNSET			UINT_MAX
 
+/* I2S channel select, I2SCTRL1 bits 11:10 */
+#define AW88261_CHSEL_START_BIT		(10)
+#define AW88261_CHSEL_BITS_LEN		(2)
+#define AW88261_CHSEL_MASK		\
+	(~(((1<<AW88261_CHSEL_BITS_LEN)-1) << AW88261_CHSEL_START_BIT))
+#define AW88261_CHSEL_LEFT		(1)
+#define AW88261_CHSEL_RIGHT		(2)
+#define AW88261_CHSEL_MONO		(3)
+
 #define AW88261_I2SSR_START_BIT			(0)
 #define AW88261_I2SSR_BITS_LEN			(4)
 #define AW88261_I2SSR_MASK				\
@@ -517,7 +526,7 @@
 #define AW88261_VCAL_FACTOR		(1<<13)
 
 #define AW88261_START_RETRIES		(5)
-#define AW88261_START_WORK_DELAY_MS	(0)
+#define AW88261_START_WORK_DELAY_MS	(10)
 
 /* NOTE: 192000 has a reg value donwstream but not listed in datasheet */
 #define AW88261_RATES (SNDRV_PCM_RATE_8000_48000 | \
@@ -584,6 +593,7 @@ enum {
 struct aw88261 {
 	struct aw_device *aw_pa;
 	struct mutex lock;
+	struct delayed_work start_work;
 	struct gpio_desc *reset_gpio;
 	struct regmap *regmap;
 	struct aw_container *aw_cfg;
@@ -607,6 +617,7 @@ struct aw88261 {
 	unsigned int rxr_slotvld_mask;
 
 	bool phase_sync;
+	unsigned int chsel_value;
 };
 
 #endif

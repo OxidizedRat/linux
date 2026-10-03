@@ -9,6 +9,7 @@
 //
 
 #include <linux/i2c.h>
+#include <linux/devm-helpers.h>
 #include <linux/firmware.h>
 #include <linux/bitops.h>
 #include <linux/regmap.h>
@@ -190,6 +191,14 @@ static int aw88261_dev_configure_syspll(struct aw88261 *aw88261)
 			~AW88261_BCKINV_MASK, aw88261->bck_inv_value);
 	if (ret)
 		return ret;
+
+	/* Which I2S channel to play, if the board overrides the profile's choice */
+	if (aw88261->chsel_value) {
+		ret = regmap_update_bits(aw_dev->regmap, AW88261_I2SCTRL1_REG,
+				~AW88261_CHSEL_MASK, aw88261->chsel_value);
+		if (ret)
+			return ret;
+	}
 
 	return aw88261_dev_check_pll(aw_dev);
 }
@@ -653,6 +662,20 @@ static void aw88261_start(struct aw88261 *aw88261)
 	aw88261_start_pa(aw88261);
 }
 
+/*
+ * The amplifier PLL locks to the I2S word clock, which the CPU DAI only
+ * starts in its trigger, after the DAPM stream event. Start the PA from a
+ * work item so its PLL check runs once the clocks are up.
+ */
+static void aw88261_start_work(struct work_struct *work)
+{
+	struct aw88261 *aw88261 = container_of(work, struct aw88261, start_work.work);
+
+	mutex_lock(&aw88261->lock);
+	aw88261_start(aw88261);
+	mutex_unlock(&aw88261->lock);
+}
+
 static int aw88261_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 {
 	struct snd_soc_component *component = dai->component;
@@ -1038,18 +1061,20 @@ static int aw88261_playback_event(struct snd_soc_dapm_widget *w,
 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
 
-	mutex_lock(&aw88261->lock);
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		aw88261_start(aw88261);
+		queue_delayed_work(system_dfl_wq, &aw88261->start_work,
+				   msecs_to_jiffies(AW88261_START_WORK_DELAY_MS));
 		break;
 	case SND_SOC_DAPM_POST_PMD:
+		cancel_delayed_work_sync(&aw88261->start_work);
+		mutex_lock(&aw88261->lock);
 		aw88261_dev_stop(aw88261->aw_pa);
+		mutex_unlock(&aw88261->lock);
 		break;
 	default:
 		break;
 	}
-	mutex_unlock(&aw88261->lock);
 
 	return 0;
 }
@@ -1231,16 +1256,26 @@ static const struct snd_soc_component_driver soc_codec_dev_aw88261 = {
 	.probe = aw88261_codec_probe,
 };
 
-static void aw88261_parse_channel_dt(struct aw88261 *aw88261)
+static int aw88261_parse_channel_dt(struct aw88261 *aw88261)
 {
 	struct aw_device *aw_dev = aw88261->aw_pa;
 	struct device_node *np = aw_dev->dev->of_node;
 	u32 channel_value = AW88261_DEV_DEFAULT_CH;
+	u32 chsel;
 
 	of_property_read_u32(np, "awinic,audio-channel", &channel_value);
 	aw88261->phase_sync = of_property_read_bool(np, "awinic,sync-flag");
 
+	if (!of_property_read_u32(np, "awinic,i2s-chsel", &chsel)) {
+		if (chsel < AW88261_CHSEL_LEFT || chsel > AW88261_CHSEL_MONO)
+			return dev_err_probe(aw88261->aw_pa->dev, -EINVAL,
+					     "invalid awinic,i2s-chsel %u\n", chsel);
+		aw88261->chsel_value = chsel << AW88261_CHSEL_START_BIT;
+	}
+
 	aw_dev->channel = channel_value;
+
+	return 0;
 }
 
 static int aw88261_init(struct aw88261 *aw88261, struct i2c_client *i2c, struct regmap *regmap)
@@ -1283,7 +1318,9 @@ static int aw88261_init(struct aw88261 *aw88261, struct i2c_client *i2c, struct 
 	aw_dev->fw_status = AW88261_DEV_FW_FAILED;
 	aw_dev->volume_desc.ctl_volume = AW88261_CTL_DEFAULT_VOL;
 	aw_dev->volume_desc.mute_volume = AW88261_MUTE_VOL;
-	aw88261_parse_channel_dt(aw88261);
+	ret = aw88261_parse_channel_dt(aw88261);
+	if (ret)
+		return ret;
 
 	return ret;
 }
@@ -1312,6 +1349,11 @@ static int aw88261_i2c_probe(struct i2c_client *i2c)
 	aw88261->rxr_slotvld_mask = 1 << AW88261_I2S_RXR_SLOTVLD_START_BIT;
 
 	mutex_init(&aw88261->lock);
+
+	ret = devm_delayed_work_autocancel(&i2c->dev, &aw88261->start_work,
+					   aw88261_start_work);
+	if (ret)
+		return ret;
 
 	i2c_set_clientdata(i2c, aw88261);
 
