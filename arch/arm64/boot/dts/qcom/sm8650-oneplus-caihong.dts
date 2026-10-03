@@ -907,6 +907,14 @@
 */
 
 &pcie0 {
+	/*
+	 * MSIs written by the endpoint never reach the GIC ITS on this board
+	 * (the root port's own MSIs do), so use the controller's internal
+	 * MSI instead.
+	 */
+	/delete-property/ msi-map;
+	/delete-property/ msi-map-mask;
+
 	wake-gpios = <&tlmm 96 GPIO_ACTIVE_HIGH>;
 	perst-gpios = <&tlmm 94 GPIO_ACTIVE_LOW>;
 
