@@ -190,7 +190,12 @@ static int ktz8866_probe(struct i2c_client *client)
 	if (ret)
 		return dev_err_probe(&client->dev, ret, "get regulator vddneg failed\n");
 
-	ktz->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable", GPIOD_OUT_HIGH);
+	/*
+	 * Dual-backlight boards (the OnePlus Pad 2) drive the HW enable of
+	 * both chips from one GPIO; let each instance claim it.
+	 */
+	ktz->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable",
+						   GPIOD_OUT_HIGH | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
 	if (IS_ERR(ktz->enable_gpio))
 		return PTR_ERR(ktz->enable_gpio);
 
