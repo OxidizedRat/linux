@@ -47,6 +47,15 @@ properties:
     minimum: 0
     maximum: 7
 
+  awinic,i2s-chsel:
+    description:
+      Override the I2S channel the amplifier plays, replacing the value set
+      by the firmware profile. Used when several amplifiers share a plain
+      stereo I2S bus. 1 selects the left channel, 2 the right channel and
+      3 the mono mix of both.
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [1, 2, 3]
+
   awinic,sync-flag:
     description:
       Flag bit used to keep the phase synchronized in the case of multiple PA
@@ -71,6 +80,15 @@ allOf:
     then:
       properties:
         reset-gpios: false
+  - if:
+      properties:
+        compatible:
+          not:
+            contains:
+              const: awinic,aw88261
+    then:
+      properties:
+        awinic,i2s-chsel: false
   - if:
       properties:
         compatible:
