@@ -581,10 +581,6 @@ static struct sk_buff *qrtr_alloc_ctrl_packet(struct qrtr_ctrl_pkt **pkt,
 int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 {
 	struct qrtr_node *node;
-	struct sockaddr_qrtr src = { AF_QIPCRTR, 0, QRTR_PORT_CTRL };
-	struct sockaddr_qrtr dst = { AF_QIPCRTR, 0, QRTR_PORT_CTRL };
-	struct qrtr_ctrl_pkt *pkt;
-	struct sk_buff *skb;
 
 	if (!ep || !ep->xmit)
 		return -EINVAL;
@@ -608,14 +604,6 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 	list_add(&node->item, &qrtr_all_nodes);
 	mutex_unlock(&qrtr_node_lock);
 	ep->node = node;
-
-	src.sq_node = qrtr_local_nid;
-	dst.sq_node = node->nid;
-	skb = qrtr_alloc_ctrl_packet(&pkt, GFP_KERNEL);
-	if (skb) {
-		pkt->cmd = cpu_to_le32(QRTR_TYPE_HELLO);
-		qrtr_node_enqueue(node, skb, QRTR_TYPE_HELLO, &src, &dst);
-	}
 
 	return 0;
 }
