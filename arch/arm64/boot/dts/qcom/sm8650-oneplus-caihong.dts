@@ -40,9 +40,7 @@
 		#size-cells = <0x02>;
 		ranges;
 		//std-out = "/framebuffer0";
-		bootargs = "console=tty0 clk_ignore_unused pd_ignore_unused";
-
-		};
+	};
 	aliases {
 		serial0 = &uart14;
 	};
