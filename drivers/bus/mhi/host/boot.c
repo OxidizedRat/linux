@@ -10,19 +10,13 @@
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
-#include <linux/iommu.h>
 #include <linux/list.h>
 #include <linux/mhi.h>
-#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/wait.h>
-#include <linux/vmalloc.h>
 #include "internal.h"
-
-#define CAIHONG_WCN_BHI_IOVA	0xa4000000
-#define CAIHONG_WCN_BHI_TEST_PHYS	0xd2000000
 
 /* Setup RDDM vector table for RDDM transfer and program RXVEC */
 int mhi_rddm_prepare(struct mhi_controller *mhi_cntrl,
@@ -220,7 +214,6 @@ static int mhi_fw_load_bhie(struct mhi_controller *mhi_cntrl,
 	struct device *dev = &mhi_cntrl->mhi_dev->dev;
 	rwlock_t *pm_lock = &mhi_cntrl->pm_lock;
 	u32 tx_status, sequence_id;
-	unsigned long deadline;
 	int ret;
 
 	read_lock_bh(pm_lock);
@@ -247,29 +240,14 @@ static int mhi_fw_load_bhie(struct mhi_controller *mhi_cntrl,
 	if (ret)
 		return ret;
 
-	/* Poll BHIE for completion; completion interrupts may not arrive. */
-	tx_status = 0;
-	ret = 1;
-	deadline = jiffies + msecs_to_jiffies(mhi_cntrl->timeout_ms);
-	while (true) {
-		if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
-			break;
-
-		if (mhi_read_reg_field(mhi_cntrl, base, BHIE_TXVECSTATUS_OFFS,
-				       BHIE_TXVECSTATUS_STATUS_BMSK, &tx_status))
-			tx_status = 0;
-		if (tx_status)
-			break;
-
-		if (time_after_eq(jiffies, deadline)) {
-			ret = 0;
-			break;
-		}
-
-		msleep(100);
-	}
-	dev_dbg(dev, "BHIE transfer result: wait=%d session=%u status=%x pm_state=%x\n",
-		ret, sequence_id, tx_status, mhi_cntrl->pm_state);
+	/* Wait for the image download to complete */
+	ret = wait_event_timeout(mhi_cntrl->state_event,
+				 MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
+				 mhi_read_reg_field(mhi_cntrl, base,
+						   BHIE_TXVECSTATUS_OFFS,
+						   BHIE_TXVECSTATUS_STATUS_BMSK,
+						   &tx_status) || tx_status,
+				 msecs_to_jiffies(mhi_cntrl->timeout_ms));
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
 	    tx_status != BHIE_TXVECSTATUS_STATUS_XFER_COMPL)
 		return -EIO;
@@ -283,8 +261,7 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	struct device *dev = &mhi_cntrl->mhi_dev->dev;
 	rwlock_t *pm_lock = &mhi_cntrl->pm_lock;
 	void __iomem *base = mhi_cntrl->bhi;
-	u32 tx_status = 0, session_id = 0;
-	unsigned long deadline;
+	u32 tx_status, session_id;
 	int ret;
 
 	read_lock_bh(pm_lock);
@@ -303,29 +280,12 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	mhi_write_reg(mhi_cntrl, base, BHI_IMGTXDB, session_id);
 	read_unlock_bh(pm_lock);
 
-	/* Poll BHI for completion; completion interrupts may not arrive. */
-	tx_status = 0;
-	ret = 1;
-	deadline = jiffies + msecs_to_jiffies(mhi_cntrl->timeout_ms);
-	while (true) {
-		if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
-			break;
-
-		if (mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
-				       BHI_STATUS_MASK, &tx_status))
-			tx_status = 0;
-		if (tx_status)
-			break;
-
-		if (time_after_eq(jiffies, deadline)) {
-			ret = 0;
-			break;
-		}
-
-		msleep(100);
-	}
-	dev_dbg(dev, "BHI transfer result: wait=%d session=%u status=%x pm_state=%x\n",
-		ret, session_id, tx_status, mhi_cntrl->pm_state);
+	/* Wait for the image download to complete */
+	ret = wait_event_timeout(mhi_cntrl->state_event,
+			   MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
+			   mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
+					      BHI_STATUS_MASK, &tx_status) || tx_status,
+			   msecs_to_jiffies(mhi_cntrl->timeout_ms));
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 		goto invalid_pm_state;
 
@@ -346,24 +306,6 @@ static void mhi_free_bhi_buffer(struct mhi_controller *mhi_cntrl,
 				struct image_info *image_info)
 {
 	struct mhi_buf *mhi_buf = image_info->mhi_buf;
-
-	if (mhi_buf->dma_addr == CAIHONG_WCN_BHI_IOVA) {
-		struct iommu_domain *domain;
-
-		domain = iommu_get_domain_for_dev(mhi_cntrl->cntrl_dev);
-		if (domain)
-			iommu_unmap(domain, CAIHONG_WCN_BHI_IOVA,
-				    mhi_buf->len);
-		if (mhi_buf->orig_dma_addr)
-			dma_free_coherent(mhi_cntrl->cntrl_dev, mhi_buf->len,
-					  mhi_buf->buf,
-					  mhi_buf->orig_dma_addr);
-		else
-			free_contig_range(PHYS_PFN(CAIHONG_WCN_BHI_TEST_PHYS),
-					  mhi_buf->len >> PAGE_SHIFT);
-		kfree(image_info);
-		return;
-	}
 
 	dma_free_coherent(mhi_cntrl->cntrl_dev, mhi_buf->len, mhi_buf->buf, mhi_buf->dma_addr);
 	kfree(image_info);
@@ -397,65 +339,10 @@ static int mhi_alloc_bhi_buffer(struct mhi_controller *mhi_cntrl,
 	mhi_buf = img_info->mhi_buf;
 
 	mhi_buf->len = alloc_size;
-	mhi_buf->orig_dma_addr = 0;
-	if (alloc_size == SZ_512K) {
-		int ret = alloc_contig_range(PHYS_PFN(CAIHONG_WCN_BHI_TEST_PHYS),
-					     PHYS_PFN(CAIHONG_WCN_BHI_TEST_PHYS +
-						      alloc_size),
-					     ACR_FLAGS_NONE, GFP_KERNEL);
-		if (!ret)
-			mhi_buf->buf = page_address(pfn_to_page(PHYS_PFN(CAIHONG_WCN_BHI_TEST_PHYS)));
-		else
-			dev_dbg(&mhi_cntrl->mhi_dev->dev,
-				"low BHI pool unavailable: %d\n", ret);
-	}
-
-	if (!mhi_buf->buf)
-		mhi_buf->buf = dma_alloc_coherent(mhi_cntrl->cntrl_dev, mhi_buf->len,
-						  &mhi_buf->dma_addr, GFP_KERNEL);
+	mhi_buf->buf = dma_alloc_coherent(mhi_cntrl->cntrl_dev, mhi_buf->len,
+					  &mhi_buf->dma_addr, GFP_KERNEL);
 	if (!mhi_buf->buf)
 		goto error_alloc_segment;
-
-	if (alloc_size == SZ_512K) {
-		struct iommu_domain *domain;
-		phys_addr_t phys;
-		phys_addr_t mapped;
-		int ret;
-
-		domain = iommu_get_domain_for_dev(mhi_cntrl->cntrl_dev);
-		if (!domain)
-			goto error_alloc_segment;
-
-		if (is_vmalloc_addr(mhi_buf->buf))
-			phys = page_to_phys(vmalloc_to_page(mhi_buf->buf));
-		else
-			phys = virt_to_phys(mhi_buf->buf);
-		mhi_buf->orig_dma_addr = mhi_buf->dma_addr;
-		mapped = iommu_iova_to_phys(domain, CAIHONG_WCN_BHI_IOVA);
-		dev_dbg(&mhi_cntrl->mhi_dev->dev,
-			"fixed BHI IOVA mapping probe: iova=%pad phys=%pa mapped=%pa orig_dma=%pad\n",
-			&(dma_addr_t){ CAIHONG_WCN_BHI_IOVA }, &phys, &mapped,
-			&mhi_buf->orig_dma_addr);
-
-		if (!mapped) {
-			ret = iommu_map(domain, CAIHONG_WCN_BHI_IOVA, phys,
-					alloc_size,
-					IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE,
-					GFP_KERNEL);
-			if (ret) {
-				dev_err(&mhi_cntrl->mhi_dev->dev,
-					"fixed BHI IOVA map failed: %d\n", ret);
-				goto error_alloc_segment;
-			}
-			mhi_buf->dma_addr = CAIHONG_WCN_BHI_IOVA;
-		} else if (mapped == phys) {
-			mhi_buf->dma_addr = CAIHONG_WCN_BHI_IOVA;
-		} else {
-			dev_err(&mhi_cntrl->mhi_dev->dev,
-				"fixed BHI IOVA mismatch\n");
-			goto error_alloc_segment;
-		}
-	}
 
 	img_info->bhi_vec = NULL;
 	img_info->entries = 1;
@@ -560,9 +447,6 @@ static int mhi_load_image_bhi(struct mhi_controller *mhi_cntrl, const u8 *fw_dat
 
 	/* Load the firmware into BHI vec table */
 	memcpy(image->mhi_buf->buf, fw_data, size);
-	dma_sync_single_for_device(mhi_cntrl->cntrl_dev,
-				   image->mhi_buf->dma_addr, size,
-				   DMA_TO_DEVICE);
 
 	ret = mhi_fw_load_bhi(mhi_cntrl, &image->mhi_buf[image->entries - 1]);
 	mhi_free_bhi_buffer(mhi_cntrl, image);
@@ -664,10 +548,6 @@ skip_req_fw:
 		dev_err(dev, "MHI did not load image over BHI%s, ret: %d\n",
 			fw_load_type == MHI_FW_LOAD_BHIE ? "e" : "",
 			ret);
-		dev_err(dev, "BHI image: fw=%s size=%zu fw_size=%zu load_type=%d ee=%d fbc=%d sbl=%zu seg=%zu\n",
-			fw_name ? fw_name : "(inline)", size, fw_sz,
-			fw_load_type, mhi_cntrl->ee, mhi_cntrl->fbc_download,
-			mhi_cntrl->sbl_size, mhi_cntrl->seg_len);
 		release_firmware(firmware);
 		goto error_fw_load;
 	}

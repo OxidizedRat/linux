@@ -122,14 +122,14 @@ static int qcom_mhi_qrtr_probe(struct mhi_device *mhi_dev,
 
 	dev_set_drvdata(&mhi_dev->dev, qdev);
 
-	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
-	if (rc)
-		return rc;
-
 	/* start channels */
 	rc = mhi_prepare_for_transfer(mhi_dev);
 	if (rc)
-		goto err_unregister;
+		return rc;
+
+	rc = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NID_AUTO);
+	if (rc)
+		goto err_unprepare;
 
 	rc = qcom_mhi_qrtr_queue_dl_buffers(mhi_dev);
 	if (rc)
@@ -141,6 +141,7 @@ static int qcom_mhi_qrtr_probe(struct mhi_device *mhi_dev,
 
 err_unregister:
 	qrtr_endpoint_unregister(&qdev->ep);
+err_unprepare:
 	mhi_unprepare_from_transfer(mhi_dev);
 
 	return rc;
