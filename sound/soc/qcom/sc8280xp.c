@@ -2,6 +2,7 @@
 // Copyright (c) 2022, Linaro Limited
 
 #include <dt-bindings/sound/qcom,q6afe.h>
+#include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <sound/soc.h>
@@ -15,13 +16,45 @@
 #include "common.h"
 #include "sdw.h"
 
+#define SC8280XP_NUM_MI2S	5
+
+static const char * const sc8280xp_mi2s_clk_names[SC8280XP_NUM_MI2S] = {
+	"pri-mi2s", "sec-mi2s", "ter-mi2s", "quat-mi2s", "quin-mi2s",
+};
+
 struct sc8280xp_snd_data {
 	bool stream_prepared[AFE_PORT_MAX];
 	struct snd_soc_card *card;
 	struct snd_soc_jack jack;
 	struct snd_soc_jack dp_jack[8];
 	bool jack_setup;
+	/* Optional MI2S bit clocks, voted through the DSP resource manager */
+	struct clk *mi2s_clk[SC8280XP_NUM_MI2S];
+	bool mi2s_clk_on[SC8280XP_NUM_MI2S];
 };
+
+static int sc8280xp_mi2s_index(unsigned int id)
+{
+	switch (id) {
+	case PRIMARY_MI2S_RX:
+	case PRIMARY_MI2S_TX:
+		return 0;
+	case SECONDARY_MI2S_RX:
+	case SECONDARY_MI2S_TX:
+		return 1;
+	case TERTIARY_MI2S_RX:
+	case TERTIARY_MI2S_TX:
+		return 2;
+	case QUATERNARY_MI2S_RX:
+	case QUATERNARY_MI2S_TX:
+		return 3;
+	case QUINARY_MI2S_RX:
+	case QUINARY_MI2S_TX:
+		return 4;
+	default:
+		return -EINVAL;
+	}
+}
 
 static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
 {
@@ -105,11 +138,49 @@ static int sc8280xp_snd_prepare(struct snd_pcm_substream *substream)
 	return qcom_snd_sdw_prepare(substream, &data->stream_prepared[cpu_dai->id]);
 }
 
+static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
+				  struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	int idx = sc8280xp_mi2s_index(cpu_dai->id);
+	unsigned long bclk;
+	int ret;
+
+	if (idx < 0 || !data->mi2s_clk[idx])
+		return 0;
+
+	if (data->mi2s_clk_on[idx]) {
+		clk_disable_unprepare(data->mi2s_clk[idx]);
+		data->mi2s_clk_on[idx] = false;
+	}
+
+	bclk = params_rate(params) * params_channels(params) *
+	       params_physical_width(params);
+	ret = clk_set_rate(data->mi2s_clk[idx], bclk);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(data->mi2s_clk[idx]);
+	if (ret)
+		return ret;
+	data->mi2s_clk_on[idx] = true;
+
+	return 0;
+}
+
 static int sc8280xp_snd_hw_free(struct snd_pcm_substream *substream)
 {
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	int idx = sc8280xp_mi2s_index(cpu_dai->id);
+
+	if (idx >= 0 && data->mi2s_clk_on[idx]) {
+		clk_disable_unprepare(data->mi2s_clk[idx]);
+		data->mi2s_clk_on[idx] = false;
+	}
 
 	return qcom_snd_sdw_hw_free(substream, &data->stream_prepared[cpu_dai->id]);
 }
@@ -117,6 +188,7 @@ static int sc8280xp_snd_hw_free(struct snd_pcm_substream *substream)
 static const struct snd_soc_ops sc8280xp_be_ops = {
 	.startup = qcom_snd_sdw_startup,
 	.shutdown = qcom_snd_sdw_shutdown,
+	.hw_params = sc8280xp_snd_hw_params,
 	.hw_free = sc8280xp_snd_hw_free,
 	.prepare = sc8280xp_snd_prepare,
 };
@@ -157,6 +229,14 @@ static int sc8280xp_platform_probe(struct platform_device *pdev)
 	ret = qcom_snd_parse_of(card);
 	if (ret)
 		return ret;
+
+	for (int i = 0; i < SC8280XP_NUM_MI2S; i++) {
+		data->mi2s_clk[i] = devm_clk_get_optional(dev, sc8280xp_mi2s_clk_names[i]);
+		if (IS_ERR(data->mi2s_clk[i]))
+			return dev_err_probe(dev, PTR_ERR(data->mi2s_clk[i]),
+					     "failed to get %s clock\n",
+					     sc8280xp_mi2s_clk_names[i]);
+	}
 
 	card->driver_name = of_device_get_match_data(dev);
 	sc8280xp_add_be_ops(card);
