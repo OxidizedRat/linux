@@ -456,22 +456,22 @@
 
 		vreg_s1c_1p2: smps1 {
 			regulator-name = "vreg_s1c_1p2";
-			regulator-min-microvolt = <1224000>;
-			regulator-max-microvolt = <1348000>;
+			regulator-min-microvolt = <1316000>;
+			regulator-max-microvolt = <1316000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
 		vreg_s2c_0p8: smps2 {
 			regulator-name = "vreg_s2c_0p8";
-			regulator-min-microvolt = <500000>;
-			regulator-max-microvolt = <1036000>;
+			regulator-min-microvolt = <976000>;
+			regulator-max-microvolt = <976000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
 		vreg_s3c_0p9: smps3 {
 			regulator-name = "vreg_s3c_0p9";
-			regulator-min-microvolt = <904000>;
-			regulator-max-microvolt = <1064000>;
+			regulator-min-microvolt = <916000>;
+			regulator-max-microvolt = <916000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
@@ -491,8 +491,8 @@
 
 		vreg_s6c_1p8: smps6 {
 			regulator-name = "vreg_s6c_1p8";
-			regulator-min-microvolt = <1856000>;
-			regulator-max-microvolt = <2000000>;
+			regulator-min-microvolt = <1864000>;
+			regulator-max-microvolt = <1864000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
@@ -604,8 +604,8 @@
 
 		vreg_s4i_0p85: smps4 {
 			regulator-name = "vreg_s4i_0p85";
-			regulator-min-microvolt = <300000>;
-			regulator-max-microvolt = <1004000>;
+			regulator-min-microvolt = <940000>;
+			regulator-max-microvolt = <940000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 
