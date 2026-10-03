@@ -37,9 +37,7 @@ struct panel_info {
 	enum mipi_dsi_pixel_format format;
 	unsigned long mode_flags;
 
-	/* The first mode is the preferred one. */
-	const struct drm_display_mode *modes;
-	unsigned int num_modes;
+	const struct drm_display_mode display_mode;
 
 	const struct drm_dsc_config *dsc_cfg;
 
@@ -130,25 +128,9 @@ static int nt36532_get_modes(struct drm_panel *panel,
 {
 	struct nt36532 *ctx = to_nt36532(panel);
 	const struct panel_info *panel_info = ctx->panel_info;
-	struct drm_display_mode *mode;
-	unsigned int i;
 
-	for (i = 0; i < panel_info->num_modes; i++) {
-		mode = drm_mode_duplicate(connector->dev, &panel_info->modes[i]);
-		if (!mode)
-			return -ENOMEM;
-
-		drm_mode_set_name(mode);
-		mode->type = DRM_MODE_TYPE_DRIVER;
-		if (i == 0)
-			mode->type |= DRM_MODE_TYPE_PREFERRED;
-		drm_mode_probed_add(connector, mode);
-	}
-
-	connector->display_info.width_mm = panel_info->modes[0].width_mm;
-	connector->display_info.height_mm = panel_info->modes[0].height_mm;
-
-	return panel_info->num_modes;
+	return drm_connector_helper_get_modes_fixed(connector,
+						    &panel_info->display_mode);
 }
 
 static const struct drm_panel_funcs nt36532_panel_funcs = {
@@ -305,34 +287,24 @@ static int csot_init_sequence(struct nt36532 *ctx)
 	return dsi_ctx.accum_err;
 }
 
-/*
- * The downstream panel description specifies a 1254876800 Hz DSI clock.
- * With four lanes, two DSI links and 8 bpp DSC this corresponds to a
- * 985084 kHz DRM mode clock. The mathematically exact 120 Hz value is too
- * low for the panel's first high-speed lock.
- *
- * Like downstream's dynamic FPS ("porch mode"), lower refresh rates keep the
- * clock and the panel commands and only stretch the vertical front porch.
- * (90/50/48 Hz need other panel commands, 144 Hz a four-mixer DPU topology.)
- */
-#define CSOT_MODE(_vfp)						\
-	{							\
-		.clock = 985084,				\
-		.hdisplay = 1500 * 2,				\
-		.hsync_start = (1500 + 118) * 2,		\
-		.hsync_end = (1500 + 118 + 20) * 2,		\
-		.htotal = (1500 + 118 + 20 + 100) * 2,		\
-		.vdisplay = 2120,				\
-		.vsync_start = 2120 + (_vfp),			\
-		.vsync_end = 2120 + (_vfp) + 2,			\
-		.vtotal = 2120 + (_vfp) + 2 + 208,		\
-		.width_mm = 250,				\
-		.height_mm = 177,				\
-	}
-
-static const struct drm_display_mode csot_display_modes[] = {
-	CSOT_MODE(26),		/* 120 Hz */
-	CSOT_MODE(2382),	/* 60 Hz */
+static const struct drm_display_mode csot_display_mode = {
+	/*
+	 * The downstream panel description specifies a 1254876800 Hz DSI clock.
+	 * With four lanes, two DSI links and 8 bpp DSC this corresponds to a
+	 * 985084 kHz DRM mode clock. The mathematically exact 120 Hz value is
+	 * too low for the panel's first high-speed lock.
+	 */
+	.clock = 985084,
+	.hdisplay = 1500 * 2,
+	.hsync_start = (1500 + 118) * 2,
+	.hsync_end = (1500 + 118 + 20) * 2,
+	.htotal = (1500 + 118 + 20 + 100) * 2,
+	.vdisplay = 2120,
+	.vsync_start = 2120 + 26,
+	.vsync_end = 2120 + 26 + 2,
+	.vtotal = 2120 + 26 + 2 + 208,
+	.width_mm = 250,
+	.height_mm = 177,
 };
 
 static const struct drm_dsc_config csot_dsc_cfg = {
@@ -438,8 +410,7 @@ static const struct panel_info csot_panel_info = {
 	.format = MIPI_DSI_FMT_RGB888,
 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS |
 		      MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT,
-	.modes = csot_display_modes,
-	.num_modes = ARRAY_SIZE(csot_display_modes),
+	.display_mode = csot_display_mode,
 	.dsc_cfg = &csot_dsc_cfg,
 	.init_sequence = csot_init_sequence,
 	.is_dual_dsi = true,
