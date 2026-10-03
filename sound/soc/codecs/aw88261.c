@@ -626,7 +626,7 @@ static int aw88261_reg_update(struct aw88261 *aw88261, bool force)
 	return ret;
 }
 
-static void aw88261_start_pa(struct aw88261 *aw88261)
+static int aw88261_start_pa(struct aw88261 *aw88261)
 {
 	int ret, i;
 
@@ -647,33 +647,64 @@ static void aw88261_start_pa(struct aw88261 *aw88261)
 			break;
 		}
 	}
-	if (ret != 0)
-		dev_err(aw88261->aw_pa->dev, "start failure (%d)\n", ret);
+
+	return ret;
 }
 
-static void aw88261_start(struct aw88261 *aw88261)
+static int aw88261_start(struct aw88261 *aw88261)
 {
 	if (aw88261->aw_pa->fw_status != AW88261_DEV_FW_OK)
-		return;
+		return 0;
 
 	if (aw88261->aw_pa->status == AW88261_DEV_PW_ON)
-		return;
+		return 0;
 
-	aw88261_start_pa(aw88261);
+	return aw88261_start_pa(aw88261);
 }
 
 /*
- * The amplifier PLL locks to the I2S word clock, which the CPU DAI only
- * starts in its trigger, after the DAPM stream event. Start the PA from a
- * work item so its PLL check runs once the clocks are up.
+ * The amplifier PLL locks to the I2S word clock, which only runs once the
+ * stream has been triggered (DAPM powers the widgets earlier, at prepare,
+ * and a stream may be prepared without ever starting). Start the PA from a
+ * work item queued by the DAI trigger, and give the clocks a few more
+ * chances to appear before giving up.
  */
 static void aw88261_start_work(struct work_struct *work)
 {
 	struct aw88261 *aw88261 = container_of(work, struct aw88261, start_work.work);
 
+	int ret, i;
+
 	mutex_lock(&aw88261->lock);
-	aw88261_start(aw88261);
+	for (i = 0; i < AW88261_START_WORK_TRIES; i++) {
+		ret = aw88261_start(aw88261);
+		if (!ret)
+			break;
+		msleep(AW88261_START_WORK_RETRY_MS);
+	}
 	mutex_unlock(&aw88261->lock);
+
+	if (ret)
+		dev_err(aw88261->aw_pa->dev, "start failure (%d)\n", ret);
+}
+
+static int aw88261_trigger(struct snd_pcm_substream *substream, int cmd,
+			   struct snd_soc_dai *dai)
+{
+	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(dai->component);
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		queue_delayed_work(system_dfl_wq, &aw88261->start_work,
+				   msecs_to_jiffies(AW88261_START_WORK_DELAY_MS));
+		break;
+	default:
+		break;
+	}
+
+	return 0;
 }
 
 static int aw88261_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
@@ -891,6 +922,7 @@ static const struct snd_soc_dai_ops aw88261_dai_ops = {
 	.set_fmt = aw88261_set_fmt,
 	.hw_params = aw88261_hw_params,
 	.set_tdm_slot = aw88261_set_tdm_slot,
+	.trigger = aw88261_trigger,
 };
 
 static struct snd_soc_dai_driver aw88261_dai[] = {
@@ -1062,10 +1094,6 @@ static int aw88261_playback_event(struct snd_soc_dapm_widget *w,
 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
 
 	switch (event) {
-	case SND_SOC_DAPM_PRE_PMU:
-		queue_delayed_work(system_dfl_wq, &aw88261->start_work,
-				   msecs_to_jiffies(AW88261_START_WORK_DELAY_MS));
-		break;
 	case SND_SOC_DAPM_POST_PMD:
 		cancel_delayed_work_sync(&aw88261->start_work);
 		mutex_lock(&aw88261->lock);
@@ -1083,7 +1111,7 @@ static const struct snd_soc_dapm_widget aw88261_dapm_widgets[] = {
 	 /* playback */
 	SND_SOC_DAPM_AIF_IN_E("AIF_RX", "Speaker_Playback", 0, 0, 0, 0,
 					aw88261_playback_event,
-					SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+					SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_OUTPUT("DAC Output"),
 
 	/* capture */
