@@ -13,7 +13,7 @@
 #include "mhi.h"
 #include "pci.h"
 
-#define MHI_TIMEOUT_DEFAULT_MS	300000
+#define MHI_TIMEOUT_DEFAULT_MS	90000
 #define OTP_INVALID_BOARD_ID	0xFFFF
 #define OTP_VALID_DUALMAC_BOARD_ID_MASK		0x1000
 #define MHI_CB_INVALID	0xff
