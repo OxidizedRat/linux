@@ -15,6 +15,7 @@
 #include <linux/property.h>
 #include <linux/soc/qcom/pdr.h>
 #include <linux/soc/qcom/pmic_glink.h>
+#include <linux/string_choices.h>
 #include <linux/math.h>
 #include <linux/units.h>
 
@@ -83,6 +84,21 @@ enum qcom_battmgr_variant {
  * 0 and then 1.
  */
 #define OPLUS_BATT_CHG_EN		24
+
+/*
+ * Oplus firmware only acts as a USB-C source (host mode, VBUS out) after the
+ * host enables OTG: 17 is the "AP enable" stock sends at boot, 18 the
+ * user-facing OTG switch.
+ */
+#define OPLUS_USB_OTG_AP_ENABLE		17
+#define OPLUS_USB_OTG_SWITCH		18
+/*
+ * VBUS for an attached device comes from the PMIC boost, which the host
+ * turns on and off when the firmware reports a device (OTG) attach/detach.
+ */
+#define OPLUS_USB_OTG_VBUS_REGULATOR_ENABLE	24
+#define OPLUS_NOTIF_OTG_ENABLE		0x50
+#define OPLUS_NOTIF_OTG_DISABLE		0x51
 
 #define BATTMGR_USB_PROPERTY_GET	0x32
 #define BATTMGR_USB_PROPERTY_SET	0x33
@@ -323,6 +339,8 @@ struct qcom_battmgr {
 
 	enum qcom_battmgr_variant variant;
 	bool oplus;
+	struct work_struct otg_work;
+	bool otg_vbus;
 
 	struct power_supply *ac_psy;
 	struct power_supply *bat_psy;
@@ -1277,6 +1295,12 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
 		 */
 		if (battmgr->oplus) {
 			dev_dbg(battmgr->dev, "oplus notification: %#x\n", notification);
+			if (notification == OPLUS_NOTIF_OTG_ENABLE ||
+			    notification == OPLUS_NOTIF_OTG_DISABLE) {
+				WRITE_ONCE(battmgr->otg_vbus,
+					   notification == OPLUS_NOTIF_OTG_ENABLE);
+				schedule_work(&battmgr->otg_work);
+			}
 			power_supply_changed(battmgr->bat_psy);
 			power_supply_changed(battmgr->usb_psy);
 			break;
@@ -1622,6 +1646,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
 	case BATTMGR_REQUEST_NOTIFICATION:
 	case BATTMGR_CHG_CTRL_LIMIT_EN:
 	case BATTMGR_BAT_PROPERTY_SET:
+	case BATTMGR_USB_PROPERTY_SET:
 		battmgr->error = 0;
 		break;
 	default:
@@ -1672,7 +1697,33 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
 		mutex_unlock(&battmgr->lock);
 		if (ret)
 			dev_err(battmgr->dev, "failed to enable charging: %d\n", ret);
+
+		mutex_lock(&battmgr->lock);
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
+						    OPLUS_USB_OTG_AP_ENABLE, 1);
+		if (!ret)
+			ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
+							    OPLUS_USB_OTG_SWITCH, 1);
+		mutex_unlock(&battmgr->lock);
+		if (ret)
+			dev_err(battmgr->dev, "failed to enable USB OTG: %d\n", ret);
 	}
+}
+
+static void qcom_battmgr_otg_worker(struct work_struct *work)
+{
+	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, otg_work);
+	bool on = READ_ONCE(battmgr->otg_vbus);
+	int ret;
+
+	mutex_lock(&battmgr->lock);
+	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
+					    OPLUS_USB_OTG_VBUS_REGULATOR_ENABLE, on);
+	mutex_unlock(&battmgr->lock);
+	if (ret)
+		dev_err(battmgr->dev, "failed to turn OTG VBUS %s: %d\n", str_on_off(on), ret);
+	else
+		dev_dbg(battmgr->dev, "OTG VBUS %s\n", str_on_off(on));
 }
 
 static void qcom_battmgr_pdr_notify(void *priv, int state)
@@ -1798,6 +1849,10 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 				   qcom_battmgr_enable_worker);
 	if (ret)
 		return ret;
+
+	ret = devm_work_autocancel(dev, &battmgr->otg_work, qcom_battmgr_otg_worker);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to initialize OTG work\n");
 
 	battmgr->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
 						       qcom_battmgr_callback,
