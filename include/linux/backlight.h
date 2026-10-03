@@ -345,7 +345,17 @@ static inline int backlight_update_status(struct backlight_device *bd)
 {
 	struct backlight_device *primary = to_primary_backlight_device(bd);
 	struct backlight_device *secondary = to_secondary_backlight_device(bd);
+	struct backlight_device *peer = bd->is_secondary ? primary : secondary;
 	int ret;
+
+	/*
+	 * Drivers program their own props, so carry the new state over to the
+	 * other half of the pair, whichever device was changed.
+	 */
+	if (peer) {
+		peer->props.brightness = bd->props.brightness;
+		peer->props.power = bd->props.power;
+	}
 
 	ret = backlight_update_status_single(primary);
 	if (!secondary || ret)
