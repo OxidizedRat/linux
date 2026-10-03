@@ -138,8 +138,25 @@ struct pmic_glink_altmode {
 
 	struct work_struct enable_work;
 
+	/* Notifications during system sleep are applied on resume. */
+	bool suspended;
+	unsigned long pending;
+
 	struct pmic_glink_altmode_port ports[PMIC_GLINK_MAX_PORTS];
 };
+
+static void pmic_glink_altmode_schedule(struct pmic_glink_altmode *altmode,
+					struct pmic_glink_altmode_port *alt_port)
+{
+	/*
+	 * The worker drives the Type-C switch and mux, whose controllers may
+	 * be suspended; touching them then hangs the SoC.
+	 */
+	if (READ_ONCE(altmode->suspended))
+		set_bit(alt_port->index, &altmode->pending);
+	else
+		schedule_work(&alt_port->work);
+}
 
 static int pmic_glink_altmode_request(struct pmic_glink_altmode *altmode, u32 cmd, u32 arg)
 {
@@ -451,7 +468,7 @@ static void pmic_glink_altmode_sc8180xp_notify(struct pmic_glink_altmode *altmod
 	alt_port->mode = mode;
 	alt_port->hpd_state = hpd_state;
 	alt_port->hpd_irq = hpd_irq;
-	schedule_work(&alt_port->work);
+	pmic_glink_altmode_schedule(altmode, alt_port);
 }
 
 #define SC8280XP_DPAM_MASK	0x3f
@@ -502,7 +519,7 @@ static void pmic_glink_altmode_sc8280xp_notify(struct pmic_glink_altmode *altmod
 		alt_port->tbt_data = *tbt;
 	}
 
-	schedule_work(&alt_port->work);
+	pmic_glink_altmode_schedule(altmode, alt_port);
 }
 
 static void pmic_glink_altmode_callback(const void *data, size_t len, void *priv)
@@ -580,6 +597,8 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 	altmode = devm_kzalloc(dev, sizeof(*altmode), GFP_KERNEL);
 	if (!altmode)
 		return -ENOMEM;
+
+	dev_set_drvdata(dev, altmode);
 
 	altmode->dev = dev;
 
@@ -700,6 +719,35 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 	return 0;
 }
 
+static int pmic_glink_altmode_prepare(struct device *dev)
+{
+	struct pmic_glink_altmode *altmode = dev_get_drvdata(dev);
+	int i;
+
+	WRITE_ONCE(altmode->suspended, true);
+	for (i = 0; i < ARRAY_SIZE(altmode->ports); i++)
+		if (altmode->ports[i].altmode)
+			cancel_work_sync(&altmode->ports[i].work);
+
+	return 0;
+}
+
+static void pmic_glink_altmode_complete(struct device *dev)
+{
+	struct pmic_glink_altmode *altmode = dev_get_drvdata(dev);
+	int i;
+
+	WRITE_ONCE(altmode->suspended, false);
+	for (i = 0; i < ARRAY_SIZE(altmode->ports); i++)
+		if (test_and_clear_bit(i, &altmode->pending))
+			schedule_work(&altmode->ports[i].work);
+}
+
+static const struct dev_pm_ops pmic_glink_altmode_pm_ops = {
+	.prepare = pmic_glink_altmode_prepare,
+	.complete = pmic_glink_altmode_complete,
+};
+
 static const struct auxiliary_device_id pmic_glink_altmode_id_table[] = {
 	{ .name = "pmic_glink.altmode", },
 	{},
@@ -710,6 +758,9 @@ static struct auxiliary_driver pmic_glink_altmode_driver = {
 	.name = "pmic_glink_altmode",
 	.probe = pmic_glink_altmode_probe,
 	.id_table = pmic_glink_altmode_id_table,
+	.driver = {
+		.pm = pm_sleep_ptr(&pmic_glink_altmode_pm_ops),
+	},
 };
 
 module_auxiliary_driver(pmic_glink_altmode_driver);
