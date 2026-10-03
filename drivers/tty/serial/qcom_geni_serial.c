@@ -1071,8 +1071,16 @@ static irqreturn_t qcom_geni_serial_isr(int isr, void *dev)
 	struct tty_port *tport = &uport->state->port;
 	struct qcom_geni_serial_port *port = to_dev_port(uport);
 
+	/*
+	 * uart_suspend_port() marks the port suspended well before ->shutdown()
+	 * disables this IRQ, and the SE stays clocked until after that. The
+	 * peer (e.g. a Bluetooth controller) can still send data in between.
+	 * The interrupt is level-triggered: returning IRQ_NONE without clearing
+	 * it makes it fire until the IRQ core disables it as spurious, and the
+	 * port never receives again after resume. Service it and drop the data.
+	 */
 	if (uport->suspended)
-		return IRQ_NONE;
+		drop_rx = true;
 
 	uart_port_lock(uport);
 
