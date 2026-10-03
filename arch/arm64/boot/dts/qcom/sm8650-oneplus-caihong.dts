@@ -777,6 +777,8 @@
 	backlight_2: backlight@11 {
 		compatible = "oneplus,caihong-ktz8866", "kinetic,ktz8866";
 		reg = <0x11>;
+		/* HW enable shared with the primary KTZ8866 */
+		enable-gpios = <&tlmm 89 GPIO_ACTIVE_HIGH>;
 		vddpos-supply = <&bl_avdd_5p9>;
 		vddneg-supply = <&bl_avee_5p9>;
 		current-num-sinks = <5>;
