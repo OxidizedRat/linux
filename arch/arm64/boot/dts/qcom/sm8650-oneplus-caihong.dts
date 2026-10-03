@@ -1172,6 +1172,70 @@
 	clock-frequency = <32000>;
 };
 
+&spi4 {
+	status = "okay";
+
+	/*
+	 * Novatek NT36532 in-cell touch, driven by the out-of-tree Oplus
+	 * "no-flash" driver. It has no flash, so its firmware is downloaded on
+	 * every power-up from firmware-data-0, which the board packaging adds
+	 * to the DTB (the firmware is not redistributable).
+	 */
+	touchscreen@0 {
+		compatible = "novatek,nf_nt36532";
+		reg = <0>;
+		spi-max-frequency = <12000000>;
+
+		interrupts-extended = <&tlmm 162 IRQ_TYPE_EDGE_FALLING>;
+		irq-gpio = <&tlmm 162 0x2002>;
+		reset-gpio = <&tlmm 161 GPIO_ACTIVE_HIGH>;
+		cs-gpio = <&tlmm 51 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-0 = <&ts_int_active>, <&ts_reset_active>;
+		pinctrl-names = "default";
+
+		panel = <&panel>;
+
+		project_id = <23926>;
+		firmware_name = "0X21N2NI9N19";
+		platform_support_project = <23926 23927 23976 23978>;
+		platform_support_project_dir = <23926 23926 23926 23926>;
+		platform_support_project_commandline =
+			"mdss_dsi_panel_csot_nt36532_2120_3000_dual_dsc_144hz_vid";
+
+		touchpanel,max-num-support = <10>;
+		touchpanel,tx-rx-num = <60 40>;
+		touchpanel,panel-coords = <21200 30000>;
+		touchpanel,display-coords = <2120 3000>;
+		touchpanel,touchmajor-limit = <0 60>;
+		touchpanel,irq_need_dev_resume_time = <500>;
+		touchpanel,int-mode = <1>;
+		touchpanel,button-type = <4>;
+		tp_type = <15>;
+		panel_type = <15>;
+
+		incell_screen;
+		fw_edge_limit_support;
+		black_gesture_support;
+		charger_pump_support;
+		esd_handle_support;
+		black_gesture_test_support;
+		game_switch_support;
+		noflash_support;
+		lcd_trigger_load_tp_fw_support;
+		smart_gesture_support;
+		pressure_report_support;
+		pen_support;
+		waterproof_support;
+		irq_need_dev_resume_ok;
+		fw_update_app_support;
+		health_monitor_support;
+		fw_update_in_probe_with_headfile;
+		black_gesture_indep_support;
+		report_rate_limit;
+	};
+};
+
 &tlmm {
 	gpio-reserved-ranges = <36 4>, <74 1>;
 
@@ -1252,6 +1316,22 @@
 		function = "gpio";
 		drive-strength = <8>;
 		bias-pull-down;
+	};
+
+	ts_int_active: ts-int-active-state {
+		pins = "gpio162";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		input-enable;
+	};
+
+	ts_reset_active: ts-reset-active-state {
+		pins = "gpio161";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+		output-high;
 	};
 };
 
