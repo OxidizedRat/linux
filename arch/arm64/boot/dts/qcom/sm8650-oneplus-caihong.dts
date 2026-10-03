@@ -158,6 +158,39 @@
 		status = "disabled";
 	};
 
+	sound {
+		compatible = "qcom,sm8650-sndcard", "qcom,sm8450-sndcard";
+		model = "OnePlus-Pad2";
+
+		/*
+		 * The six AW88261 amplifiers sit on one I2S bus. Mainline
+		 * AudioReach has no TDM backend, so they are driven as plain
+		 * stereo over SEC_MI2S SD1, each amp picking its side.
+		 */
+		clocks = <&q6prmcc LPASS_CLK_ID_SEC_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
+		clock-names = "sec-mi2s";
+
+		pinctrl-0 = <&i2s1_default>;
+		pinctrl-names = "default";
+
+		speaker-dai-link {
+			link-name = "Speaker Playback";
+
+			codec {
+				sound-dai = <&spk_l1>, <&spk_l2>, <&spk_l3>,
+					    <&spk_r1>, <&spk_r2>, <&spk_r3>;
+			};
+
+			cpu {
+				sound-dai = <&q6apmbedai SECONDARY_MI2S_RX>;
+			};
+
+			platform {
+				sound-dai = <&q6apm>;
+			};
+		};
+	};
+
 	vph_pwr: vph-pwr-regulator {
 		compatible = "regulator-fixed";
 
@@ -663,7 +696,42 @@
 
 	status = "okay";
 
-	/* awinic,aw88261_smartpa @34,35,37 */
+	/* left speakers */
+	spk_l1: amplifier@34 {
+		compatible = "awinic,aw88261";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		dvdd-supply = <&vreg_l15b_1p8>;
+		firmware-name = "aw882xx_acf.bin";
+		awinic,audio-channel = <0>;
+		awinic,i2s-chsel = <1>;
+		awinic,sync-flag;
+		sound-name-prefix = "SpkL1";
+	};
+
+	spk_l2: amplifier@35 {
+		compatible = "awinic,aw88261";
+		reg = <0x35>;
+		#sound-dai-cells = <0>;
+		dvdd-supply = <&vreg_l15b_1p8>;
+		firmware-name = "aw882xx_acf.bin";
+		awinic,audio-channel = <2>;
+		awinic,i2s-chsel = <1>;
+		awinic,sync-flag;
+		sound-name-prefix = "SpkL2";
+	};
+
+	spk_l3: amplifier@37 {
+		compatible = "awinic,aw88261";
+		reg = <0x37>;
+		#sound-dai-cells = <0>;
+		dvdd-supply = <&vreg_l15b_1p8>;
+		firmware-name = "aw882xx_acf.bin";
+		awinic,audio-channel = <6>;
+		awinic,i2s-chsel = <1>;
+		awinic,sync-flag;
+		sound-name-prefix = "SpkL3";
+	};
 };
 
 &i2c_hub_7 {
@@ -671,7 +739,42 @@
 
 	status = "okay";
 
-	/* awinic,aw88261_smartpa @34,35,37 */
+	/* right speakers */
+	spk_r1: amplifier@34 {
+		compatible = "awinic,aw88261";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		dvdd-supply = <&vreg_l15b_1p8>;
+		firmware-name = "aw882xx_acf.bin";
+		awinic,audio-channel = <1>;
+		awinic,i2s-chsel = <2>;
+		awinic,sync-flag;
+		sound-name-prefix = "SpkR1";
+	};
+
+	spk_r2: amplifier@35 {
+		compatible = "awinic,aw88261";
+		reg = <0x35>;
+		#sound-dai-cells = <0>;
+		dvdd-supply = <&vreg_l15b_1p8>;
+		firmware-name = "aw882xx_acf.bin";
+		awinic,audio-channel = <3>;
+		awinic,i2s-chsel = <2>;
+		awinic,sync-flag;
+		sound-name-prefix = "SpkR2";
+	};
+
+	spk_r3: amplifier@37 {
+		compatible = "awinic,aw88261";
+		reg = <0x37>;
+		#sound-dai-cells = <0>;
+		dvdd-supply = <&vreg_l15b_1p8>;
+		firmware-name = "aw882xx_acf.bin";
+		awinic,audio-channel = <5>;
+		awinic,i2s-chsel = <2>;
+		awinic,sync-flag;
+		sound-name-prefix = "SpkR3";
+	};
 };
 
 &i2c2 {
@@ -1088,6 +1191,36 @@
 			bias-pull-down;
 		};
 	};
+	i2s1_default: i2s1-default-state {
+		sck-pins {
+			pins = "gpio121";
+			function = "i2s1_sck";
+			drive-strength = <6>;
+			bias-disable;
+		};
+
+		data0-pins {
+			pins = "gpio122";
+			function = "i2s1_data0";
+			drive-strength = <6>;
+			bias-disable;
+		};
+
+		ws-pins {
+			pins = "gpio123";
+			function = "i2s1_ws";
+			drive-strength = <6>;
+			bias-disable;
+		};
+
+		data1-pins {
+			pins = "gpio124";
+			function = "i2s1_data1";
+			drive-strength = <6>;
+			bias-disable;
+		};
+	};
+
 	disp_reset_n_active: disp-reset-n-active-state {
 		pins = "gpio133";
 		function = "gpio";
