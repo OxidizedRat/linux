@@ -100,6 +100,14 @@ enum qcom_battmgr_variant {
 #define OPLUS_NOTIF_OTG_ENABLE		0x50
 #define OPLUS_NOTIF_OTG_DISABLE		0x51
 
+/*
+ * Oplus firmware also leaves the charge current and the USB-PD voltage to
+ * the host: until the host writes the charge current limit it charges at
+ * about 300 mA, and it keeps a PD charger at 5 V until the host asks for a
+ * fixed PDO (25, in mV; 5000, 9000 or 12000).
+ */
+#define OPLUS_BATT_SET_PDO		25
+
 #define BATTMGR_USB_PROPERTY_GET	0x32
 #define BATTMGR_USB_PROPERTY_SET	0x33
 #define USB_ONLINE			0
@@ -323,6 +331,7 @@ struct qcom_battmgr_usb {
 	unsigned int current_max;
 	unsigned int current_limit;
 	unsigned int usb_type;
+	unsigned int adap_type;
 };
 
 struct qcom_battmgr_wireless {
@@ -341,6 +350,9 @@ struct qcom_battmgr {
 	bool oplus;
 	struct work_struct otg_work;
 	bool otg_vbus;
+	struct delayed_work chg_work;
+	int chg_fcc_ma;
+	int chg_pdo_mv;
 
 	struct power_supply *ac_psy;
 	struct power_supply *bat_psy;
@@ -1283,6 +1295,8 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
 		power_supply_changed(battmgr->bat_psy);
 		break;
 	case NOTIF_USB_PROPERTY:
+		if (battmgr->oplus)
+			mod_delayed_work(system_dfl_wq, &battmgr->chg_work, HZ);
 		power_supply_changed(battmgr->usb_psy);
 		break;
 	case NOTIF_WLS_PROPERTY:
@@ -1301,6 +1315,8 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
 					   notification == OPLUS_NOTIF_OTG_ENABLE);
 				schedule_work(&battmgr->otg_work);
 			}
+			/* plug-in, adapter type and PD events */
+			mod_delayed_work(system_dfl_wq, &battmgr->chg_work, HZ);
 			power_supply_changed(battmgr->bat_psy);
 			power_supply_changed(battmgr->usb_psy);
 			break;
@@ -1524,7 +1540,7 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
 			break;
 		case BATT_TEMP:
 			val = le32_to_cpu(resp->intval.value);
-			battmgr->status.temperature = DIV_ROUND_CLOSEST(val, 10);
+			battmgr->status.temperature = DIV_ROUND_CLOSEST((int)val, 10);
 			break;
 		case BATT_TECHNOLOGY:
 			battmgr->info.technology = le32_to_cpu(resp->intval.value);
@@ -1602,6 +1618,9 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
 			break;
 		case USB_TYPE:
 			battmgr->usb.usb_type = le32_to_cpu(resp->intval.value);
+			break;
+		case USB_ADAP_TYPE:
+			battmgr->usb.adap_type = le32_to_cpu(resp->intval.value);
 			break;
 		default:
 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
@@ -1707,7 +1726,125 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
 		mutex_unlock(&battmgr->lock);
 		if (ret)
 			dev_err(battmgr->dev, "failed to enable USB OTG: %d\n", ret);
+
+		battmgr->chg_fcc_ma = -1;
+		battmgr->chg_pdo_mv = 0;
+		mod_delayed_work(system_dfl_wq, &battmgr->chg_work, HZ);
 	}
+}
+
+/*
+ * Wired charging limits for the OnePlus Pad 2, from stock (oplus-chg-23926.dtsi,
+ * the "oplus,wired" and "oplus,comm" nodes): a PD charger runs at 9 V with a
+ * 2 A input limit (18 W), and the battery charge current depends on the
+ * adapter type and the battery temperature. Stock also lowers the charge
+ * voltage to 4.13 V between 45 and 53 C, which this firmware doesn't accept
+ * from the host; there the current is cut to 1 A and charging stops above
+ * 4.1 V instead.
+ */
+#define OPLUS_CHG_PERIOD		(30 * HZ)
+#define OPLUS_PD_ICL_UA			2000000
+
+/* usb_type_map order: firmware adapter types */
+enum { ADAP_UNKNOWN, ADAP_SDP, ADAP_DCP, ADAP_CDP, ADAP_ACA, ADAP_C,
+       ADAP_PD, ADAP_PD_DRP, ADAP_PD_PPS };
+
+static int qcom_battmgr_oplus_fcc_ma(struct qcom_battmgr *battmgr)
+{
+	int temp = (int)battmgr->status.temperature;	/* 0.1 C */
+	unsigned int uv = battmgr->status.voltage_now;
+	int max;
+
+	switch (battmgr->usb.adap_type) {
+	case ADAP_SDP:
+		max = 600;
+		break;
+	case ADAP_CDP:
+		max = 1600;
+		break;
+	case ADAP_PD:
+	case ADAP_PD_DRP:
+	case ADAP_PD_PPS:
+		max = 4000;
+		break;
+	default:
+		max = 2200;
+		break;
+	}
+
+	if (temp < -100 || temp >= 530)
+		return 0;
+	if (temp < 0)
+		return min(max, 1200);
+	if (temp >= 450)
+		return uv > 4100000 ? 0 : min(max, 1000);
+	return max;
+}
+
+static void qcom_battmgr_oplus_chg_worker(struct work_struct *work)
+{
+	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr,
+						    chg_work.work);
+	int fcc_ma, pdo_mv = 0;
+	bool pd;
+	int ret;
+
+	mutex_lock(&battmgr->lock);
+	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
+	if (!ret && !battmgr->usb.online) {
+		/* the firmware resets PD and the charge current on unplug */
+		battmgr->chg_fcc_ma = -1;
+		battmgr->chg_pdo_mv = 0;
+		goto out_unlock;
+	}
+	if (!ret)
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET,
+						    USB_ADAP_TYPE, 0);
+	if (!ret)
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET,
+						    BATT_TEMP, 0);
+	if (!ret)
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET,
+						    BATT_VOLT_NOW, 0);
+	if (ret)
+		goto out_resched;
+
+	pd = battmgr->usb.adap_type == ADAP_PD || battmgr->usb.adap_type == ADAP_PD_DRP ||
+	     battmgr->usb.adap_type == ADAP_PD_PPS;
+	if (pd && battmgr->chg_pdo_mv != 9000) {
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
+						    OPLUS_BATT_SET_PDO, 9000);
+		if (!ret)
+			ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
+							    USB_INPUT_CURR_LIMIT,
+							    OPLUS_PD_ICL_UA);
+		if (ret)
+			dev_warn(battmgr->dev, "failed to select 9 V PD: %d\n", ret);
+		else
+			pdo_mv = 9000;
+	}
+	if (pdo_mv)
+		battmgr->chg_pdo_mv = pdo_mv;
+
+	fcc_ma = qcom_battmgr_oplus_fcc_ma(battmgr);
+	if (fcc_ma != battmgr->chg_fcc_ma) {
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
+						    BATT_CHG_CTRL_LIM, fcc_ma * 1000);
+		if (ret) {
+			dev_warn(battmgr->dev, "failed to set charge current: %d\n", ret);
+		} else {
+			dev_dbg(battmgr->dev, "adapter %u, %d.%d C: charge current %d mA\n",
+				battmgr->usb.adap_type, battmgr->status.temperature / 10,
+				abs(battmgr->status.temperature % 10), fcc_ma);
+			battmgr->chg_fcc_ma = fcc_ma;
+		}
+	}
+
+out_resched:
+	/* follow the battery temperature while a charger is attached */
+	mod_delayed_work(system_dfl_wq, &battmgr->chg_work, OPLUS_CHG_PERIOD);
+out_unlock:
+	mutex_unlock(&battmgr->lock);
 }
 
 static void qcom_battmgr_otg_worker(struct work_struct *work)
@@ -1849,6 +1986,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 				   qcom_battmgr_enable_worker);
 	if (ret)
 		return ret;
+
+	ret = devm_delayed_work_autocancel(dev, &battmgr->chg_work,
+					   qcom_battmgr_oplus_chg_worker);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to initialize charge work\n");
 
 	ret = devm_work_autocancel(dev, &battmgr->otg_work, qcom_battmgr_otg_worker);
 	if (ret)
