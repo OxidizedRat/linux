@@ -358,6 +358,26 @@ static void qcom_pcie_clear_aspm_l0s(struct dw_pcie *pci)
 	dw_pcie_dbi_ro_wr_dis(pci);
 }
 
+/*
+ * A Root Port whose DT node describes the device below it (e.g. a soldered
+ * WLAN chip powered through pwrctrl) has no hot-pluggable slot.
+ */
+static bool qcom_pcie_slot_is_fixed(struct dw_pcie *pci)
+{
+	struct device_node *port, *child;
+
+	for_each_available_child_of_node(pci->dev->of_node, port) {
+		child = of_get_next_available_child(port, NULL);
+		if (child) {
+			of_node_put(child);
+			of_node_put(port);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static void qcom_pcie_set_slot_nccs(struct dw_pcie *pci)
 {
 	u16 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
@@ -372,6 +392,16 @@ static void qcom_pcie_set_slot_nccs(struct dw_pcie *pci)
 	 */
 	val = readl(pci->dbi_base + offset + PCI_EXP_SLTCAP);
 	val |= PCI_EXP_SLTCAP_NCCS;
+
+	/*
+	 * The Root Ports advertise Hot-Plug capability whether or not there is
+	 * a slot. With a fixed device below the port, that only stops the PCI
+	 * core from putting the port into D3, which keeps the link and its
+	 * clocks (and XO) up through system suspend.
+	 */
+	if (qcom_pcie_slot_is_fixed(pci))
+		val &= ~(PCI_EXP_SLTCAP_HPC | PCI_EXP_SLTCAP_HPS);
+
 	writel(val, pci->dbi_base + offset + PCI_EXP_SLTCAP);
 
 	dw_pcie_dbi_ro_wr_dis(pci);
