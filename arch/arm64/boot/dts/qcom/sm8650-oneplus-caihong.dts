@@ -709,6 +709,20 @@
 	};
 };
 
+/*
+ * The crypto engine holds a permanent DDR vote (QCOM_ICC_TAG_ALWAYS) that
+ * keeps DDR up in suspend; the CPU's crypto extensions are faster for
+ * everything it would be used for.
+ *
+ * Without that vote, s2idle hangs on wakeup (any wake source; watchdog
+ * reset ~45 s later) both while the CDSP runs and when it was never
+ * booted; it works after the CDSP has been booted and shut down again,
+ * which userspace does (nothing uses the CDSP).
+ */
+&crypto {
+	status = "disabled";
+};
+
 &gpi_dma1 {
 	status = "okay";
 };
