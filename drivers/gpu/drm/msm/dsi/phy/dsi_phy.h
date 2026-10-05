@@ -116,6 +116,7 @@ struct msm_dsi_phy {
 	bool regulator_ldo_mode;
 	bool cphy_mode;
 
+	struct clk *ahb_clk;
 	struct clk_hw *vco_hw;
 	bool pll_on;
 
