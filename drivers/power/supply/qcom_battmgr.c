@@ -356,6 +356,7 @@ struct qcom_battmgr {
 	u32 chg_pdo_mv;
 	bool chg_full;
 	unsigned int chg_full_count;
+	bool chg_limit_hold;
 	int chg_region;
 	unsigned int chg_fv_dec_mv;
 
@@ -566,8 +567,11 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 	if (!battmgr->service_up)
 		return -EAGAIN;
 
-	if (battmgr->variant == QCOM_BATTMGR_SC8280XP ||
-	    battmgr->variant == QCOM_BATTMGR_X1E80100)
+	if (battmgr->oplus && (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD ||
+			       psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD))
+		ret = 0;	/* kept by the host, see the charge worker */
+	else if (battmgr->variant == QCOM_BATTMGR_SC8280XP ||
+		 battmgr->variant == QCOM_BATTMGR_X1E80100)
 		ret = qcom_battmgr_bat_sc8280xp_update(battmgr, psp);
 	else
 		ret = qcom_battmgr_bat_sm8350_update(battmgr, psp);
@@ -578,9 +582,12 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = battmgr->status.status;
 		/* the host ends the charge on Oplus firmware, see the charge worker */
-		if (battmgr->oplus && READ_ONCE(battmgr->chg_full) &&
-		    val->intval == POWER_SUPPLY_STATUS_CHARGING)
-			val->intval = POWER_SUPPLY_STATUS_FULL;
+		if (battmgr->oplus && val->intval == POWER_SUPPLY_STATUS_CHARGING) {
+			if (READ_ONCE(battmgr->chg_full))
+				val->intval = POWER_SUPPLY_STATUS_FULL;
+			else if (READ_ONCE(battmgr->chg_limit_hold))
+				val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+		}
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 		val->intval = battmgr->info.charge_type;
@@ -719,6 +726,15 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 static int qcom_battmgr_set_charge_control(struct qcom_battmgr *battmgr,
 					   u32 target_soc, u32 delta_soc)
 {
+	/*
+	 * Oplus firmware has its own properties in place of the charge control
+	 * ones; the charge worker applies the thresholds instead.
+	 */
+	if (battmgr->oplus) {
+		mod_delayed_work(system_dfl_wq, &battmgr->chg_work, HZ / 2);
+		return 0;
+	}
+
 	struct qcom_battmgr_charge_ctrl_request request = {
 		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
 		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
@@ -1003,6 +1019,8 @@ static const enum power_supply_property oplus_bat_props[] = {
 	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
 	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
 	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
+	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
 };
 
 static const struct power_supply_desc oplus_bat_psy_desc = {
@@ -1011,6 +1029,8 @@ static const struct power_supply_desc oplus_bat_psy_desc = {
 	.properties = oplus_bat_props,
 	.num_properties = ARRAY_SIZE(oplus_bat_props),
 	.get_property = qcom_battmgr_bat_get_property,
+	.set_property = qcom_battmgr_bat_set_property,
+	.property_is_writeable = qcom_battmgr_bat_is_writeable,
 };
 
 static const struct power_supply_desc sm8550_bat_psy_desc = {
@@ -1819,6 +1839,7 @@ static void qcom_battmgr_oplus_chg_worker(struct work_struct *work)
 						    chg_work.work);
 	const u16 *fcc_table;
 	int temp, region, ibat_ua, ret;
+	bool limit_hold;
 	unsigned int vbat_mv;
 	u32 fcc_ma, fv_mv;
 
@@ -1847,6 +1868,9 @@ static void qcom_battmgr_oplus_chg_worker(struct work_struct *work)
 	if (!ret)
 		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET,
 						    BATT_CURR_NOW, 0);
+	if (!ret)
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET,
+						    BATT_CAPACITY, 0);
 	if (ret)
 		goto out_resched;
 
@@ -1895,6 +1919,24 @@ static void qcom_battmgr_oplus_chg_worker(struct work_struct *work)
 		power_supply_changed(battmgr->bat_psy);
 	}
 
+	/*
+	 * Charge limit (charge_control_*_threshold): stop at the end
+	 * threshold, start again at or below the start threshold.
+	 */
+	limit_hold = battmgr->chg_limit_hold;
+	if (battmgr->info.charge_ctrl_end >= CHARGE_CTRL_END_THR_MAX)
+		limit_hold = false;
+	else if (battmgr->status.percent >= battmgr->info.charge_ctrl_end)
+		limit_hold = true;
+	else if (battmgr->status.percent <= battmgr->info.charge_ctrl_start)
+		limit_hold = false;
+	if (limit_hold != battmgr->chg_limit_hold) {
+		WRITE_ONCE(battmgr->chg_limit_hold, limit_hold);
+		dev_info(battmgr->dev, "charge limit: %s at %u%%\n",
+			 limit_hold ? "holding" : "charging", battmgr->status.percent);
+		power_supply_changed(battmgr->bat_psy);
+	}
+
 	switch (battmgr->usb.adap_type) {
 	case ADAP_SDP:
 		fcc_table = oplus_fcc_sdp_ma;
@@ -1906,7 +1948,7 @@ static void qcom_battmgr_oplus_chg_worker(struct work_struct *work)
 		fcc_table = qcom_battmgr_oplus_pd(battmgr) ? oplus_fcc_pd_ma : oplus_fcc_dcp_ma;
 		break;
 	}
-	fcc_ma = battmgr->chg_full ? 0 : fcc_table[region];
+	fcc_ma = battmgr->chg_full || limit_hold ? 0 : fcc_table[region];
 	fv_mv = oplus_fv_mv[region] + OPLUS_FV_HW_INC_MV - battmgr->chg_fv_dec_mv;
 
 	/* lower the voltage before raising the current, and the reverse */
@@ -2011,6 +2053,11 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
 	if (ret < 0)
 		return dev_err_probe(dev, ret,
 				     "failed to init battery charge control thresholds\n");
+	/* no limit until userspace sets one */
+	if (battmgr->oplus && !battmgr->info.charge_ctrl_end) {
+		battmgr->info.charge_ctrl_start = CHARGE_CTRL_START_THR_MAX;
+		battmgr->info.charge_ctrl_end = CHARGE_CTRL_END_THR_MAX;
+	}
 
 	if (battmgr->variant == QCOM_BATTMGR_SC8280XP ||
 	    battmgr->variant == QCOM_BATTMGR_X1E80100) {
