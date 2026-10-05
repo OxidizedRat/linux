@@ -351,8 +351,13 @@ struct qcom_battmgr {
 	struct work_struct otg_work;
 	bool otg_vbus;
 	struct delayed_work chg_work;
-	int chg_fcc_ma;
-	int chg_pdo_mv;
+	u32 chg_fcc_ma;		/* last values written, U32_MAX: none */
+	u32 chg_fv_mv;
+	u32 chg_pdo_mv;
+	bool chg_full;
+	unsigned int chg_full_count;
+	int chg_region;
+	unsigned int chg_fv_dec_mv;
 
 	struct power_supply *ac_psy;
 	struct power_supply *bat_psy;
@@ -572,6 +577,10 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = battmgr->status.status;
+		/* the host ends the charge on Oplus firmware, see the charge worker */
+		if (battmgr->oplus && READ_ONCE(battmgr->chg_full) &&
+		    val->intval == POWER_SUPPLY_STATUS_CHARGING)
+			val->intval = POWER_SUPPLY_STATUS_FULL;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 		val->intval = battmgr->info.charge_type;
@@ -1727,74 +1736,103 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
 		if (ret)
 			dev_err(battmgr->dev, "failed to enable USB OTG: %d\n", ret);
 
-		battmgr->chg_fcc_ma = -1;
-		battmgr->chg_pdo_mv = 0;
+		battmgr->chg_fcc_ma = U32_MAX;
+		battmgr->chg_fv_mv = U32_MAX;
+		battmgr->chg_pdo_mv = U32_MAX;
+		battmgr->chg_full = false;
+		battmgr->chg_full_count = 0;
+		battmgr->chg_region = -1;
+		battmgr->chg_fv_dec_mv = 0;
 		mod_delayed_work(system_dfl_wq, &battmgr->chg_work, HZ);
 	}
 }
 
 /*
- * Wired charging limits for the OnePlus Pad 2, from stock (oplus-chg-23926.dtsi,
- * the "oplus,wired" and "oplus,comm" nodes): a PD charger runs at 9 V with a
- * 2 A input limit (18 W), and the battery charge current depends on the
- * adapter type and the battery temperature. Stock also lowers the charge
- * voltage to 4.13 V between 45 and 53 C, which this firmware doesn't accept
- * from the host; there the current is cut to 1 A and charging stops above
- * 4.1 V instead.
+ * Wired charging for the OnePlus Pad 2, following stock (oplus-chg-23926.dtsi,
+ * "oplus,wired" and "oplus,comm"). A PD charger runs at 9 V with a 2 A input
+ * limit (18 W). The charge voltage and current depend on the battery
+ * temperature region and the adapter type. The firmware doesn't end a charge
+ * by itself (it holds the battery at the charge voltage), so like stock the
+ * host declares the battery full once it is near the charge voltage and the
+ * charge current has dropped to the termination current, then sets the
+ * charge current to 0 (the charger keeps powering the system) until the
+ * battery falls below the recharge voltage.
  */
 #define OPLUS_CHG_PERIOD		(30 * HZ)
 #define OPLUS_PD_ICL_UA			2000000
+#define OPLUS_ITERM_UA			500000
+#define OPLUS_FV_HW_INC_MV		18
+#define OPLUS_FV_DEC_MV			8
+#define OPLUS_FV_DEC_MAX_MV		200
 
 /* usb_type_map order: firmware adapter types */
 enum { ADAP_UNKNOWN, ADAP_SDP, ADAP_DCP, ADAP_CDP, ADAP_ACA, ADAP_C,
        ADAP_PD, ADAP_PD_DRP, ADAP_PD_PPS };
 
-static int qcom_battmgr_oplus_fcc_ma(struct qcom_battmgr *battmgr)
+/* temperature regions: cold, little cold, cool, little cool, pre-normal, normal, warm, hot */
+#define OPLUS_TEMP_REGIONS		8
+static const int oplus_temp_thr[OPLUS_TEMP_REGIONS - 1] = {	/* 0.1 C */
+	-100, 0, 50, 120, 160, 450, 530
+};
+static const u16 oplus_fv_mv[OPLUS_TEMP_REGIONS] = {
+	0, 4430, 4455, 4455, 4455, 4455, 4130, 4130
+};
+/* above this the charge voltage is lowered in OPLUS_FV_DEC_MV steps */
+static const u16 oplus_over_fv_mv[OPLUS_TEMP_REGIONS] = {
+	0, 4440, 4465, 4465, 4465, 4465, 4140, 4140
+};
+static const u16 oplus_full_mv[OPLUS_TEMP_REGIONS] = {
+	0, 4420, 4420, 4420, 4420, 4420, 4080, 4080
+};
+static const u16 oplus_rechg_mv[OPLUS_TEMP_REGIONS] = {
+	0, 4130, 4265, 4365, 4365, 4365, 4030, 0
+};
+static const u16 oplus_fcc_sdp_ma[OPLUS_TEMP_REGIONS] = { 0, 600, 600, 600, 600, 600, 600, 0 };
+static const u16 oplus_fcc_cdp_ma[OPLUS_TEMP_REGIONS] = { 0, 1200, 1600, 1600, 1600, 1600, 1600, 0 };
+static const u16 oplus_fcc_dcp_ma[OPLUS_TEMP_REGIONS] = { 0, 1200, 2200, 2200, 2200, 2200, 2200, 0 };
+static const u16 oplus_fcc_pd_ma[OPLUS_TEMP_REGIONS] = { 0, 1200, 4000, 4000, 4000, 4000, 2200, 0 };
+
+static bool qcom_battmgr_oplus_pd(struct qcom_battmgr *battmgr)
 {
-	int temp = (int)battmgr->status.temperature;	/* 0.1 C */
-	unsigned int uv = battmgr->status.voltage_now;
-	int max;
+	return battmgr->usb.adap_type == ADAP_PD || battmgr->usb.adap_type == ADAP_PD_DRP ||
+	       battmgr->usb.adap_type == ADAP_PD_PPS;
+}
 
-	switch (battmgr->usb.adap_type) {
-	case ADAP_SDP:
-		max = 600;
-		break;
-	case ADAP_CDP:
-		max = 1600;
-		break;
-	case ADAP_PD:
-	case ADAP_PD_DRP:
-	case ADAP_PD_PPS:
-		max = 4000;
-		break;
-	default:
-		max = 2200;
-		break;
-	}
+static int qcom_battmgr_oplus_set(struct qcom_battmgr *battmgr, int prop, u32 val, u32 *cache)
+{
+	int ret;
 
-	if (temp < -100 || temp >= 530)
+	if (*cache == val)
 		return 0;
-	if (temp < 0)
-		return min(max, 1200);
-	if (temp >= 450)
-		return uv > 4100000 ? 0 : min(max, 1000);
-	return max;
+	ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET, prop, val);
+	if (ret)
+		dev_warn(battmgr->dev, "failed to set battery property %d to %u: %d\n",
+			 prop, val, ret);
+	else
+		*cache = val;
+	return ret;
 }
 
 static void qcom_battmgr_oplus_chg_worker(struct work_struct *work)
 {
 	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr,
 						    chg_work.work);
-	int fcc_ma, pdo_mv = 0;
-	bool pd;
-	int ret;
+	const u16 *fcc_table;
+	int temp, region, ibat_ua, ret;
+	unsigned int vbat_mv;
+	u32 fcc_ma, fv_mv;
 
 	mutex_lock(&battmgr->lock);
 	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, USB_ONLINE, 0);
 	if (!ret && !battmgr->usb.online) {
-		/* the firmware resets PD and the charge current on unplug */
-		battmgr->chg_fcc_ma = -1;
-		battmgr->chg_pdo_mv = 0;
+		/* the firmware resets PD, the charge current and voltage on unplug */
+		battmgr->chg_fcc_ma = U32_MAX;
+		battmgr->chg_fv_mv = U32_MAX;
+		battmgr->chg_pdo_mv = U32_MAX;
+		battmgr->chg_full = false;
+		battmgr->chg_full_count = 0;
+		battmgr->chg_region = -1;
+		battmgr->chg_fv_dec_mv = 0;
 		goto out_unlock;
 	}
 	if (!ret)
@@ -1806,42 +1844,84 @@ static void qcom_battmgr_oplus_chg_worker(struct work_struct *work)
 	if (!ret)
 		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET,
 						    BATT_VOLT_NOW, 0);
+	if (!ret)
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_GET,
+						    BATT_CURR_NOW, 0);
 	if (ret)
 		goto out_resched;
 
-	pd = battmgr->usb.adap_type == ADAP_PD || battmgr->usb.adap_type == ADAP_PD_DRP ||
-	     battmgr->usb.adap_type == ADAP_PD_PPS;
-	if (pd && battmgr->chg_pdo_mv != 9000) {
-		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
-						    OPLUS_BATT_SET_PDO, 9000);
-		if (!ret)
-			ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
-							    USB_INPUT_CURR_LIMIT,
-							    OPLUS_PD_ICL_UA);
-		if (ret)
-			dev_warn(battmgr->dev, "failed to select 9 V PD: %d\n", ret);
-		else
-			pdo_mv = 9000;
-	}
-	if (pdo_mv)
-		battmgr->chg_pdo_mv = pdo_mv;
+	temp = (int)battmgr->status.temperature;		/* 0.1 C */
+	for (region = 0; region < OPLUS_TEMP_REGIONS - 1; region++)
+		if (temp < oplus_temp_thr[region])
+			break;
+	vbat_mv = battmgr->status.voltage_now / 1000;
+	ibat_ua = -battmgr->status.current_now;			/* > 0: charging */
 
-	fcc_ma = qcom_battmgr_oplus_fcc_ma(battmgr);
-	if (fcc_ma != battmgr->chg_fcc_ma) {
-		ret = qcom_battmgr_request_property(battmgr, BATTMGR_BAT_PROPERTY_SET,
-						    BATT_CHG_CTRL_LIM, fcc_ma * 1000);
-		if (ret) {
-			dev_warn(battmgr->dev, "failed to set charge current: %d\n", ret);
-		} else {
-			dev_dbg(battmgr->dev, "adapter %u, %d.%d C: charge current %d mA\n",
-				battmgr->usb.adap_type, battmgr->status.temperature / 10,
-				abs(battmgr->status.temperature % 10), fcc_ma);
-			battmgr->chg_fcc_ma = fcc_ma;
+	if (region != battmgr->chg_region) {
+		battmgr->chg_region = region;
+		battmgr->chg_fv_dec_mv = 0;
+	}
+	/* battery above the limit for this region: step the charge voltage down */
+	if (oplus_over_fv_mv[region] && vbat_mv > oplus_over_fv_mv[region] &&
+	    battmgr->chg_fv_dec_mv < OPLUS_FV_DEC_MAX_MV)
+		battmgr->chg_fv_dec_mv += OPLUS_FV_DEC_MV;
+
+	if (qcom_battmgr_oplus_pd(battmgr) && battmgr->chg_pdo_mv != 9000) {
+		ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_SET,
+						    USB_INPUT_CURR_LIMIT, OPLUS_PD_ICL_UA);
+		if (!ret)
+			qcom_battmgr_oplus_set(battmgr, OPLUS_BATT_SET_PDO, 9000,
+					       &battmgr->chg_pdo_mv);
+		else
+			dev_warn(battmgr->dev, "failed to set the PD input limit: %d\n", ret);
+	}
+
+	/* full: near the charge voltage with the current down to termination */
+	if (!battmgr->chg_full) {
+		if (oplus_full_mv[region] && vbat_mv >= oplus_full_mv[region] &&
+		    ibat_ua >= 0 && ibat_ua <= OPLUS_ITERM_UA)
+			battmgr->chg_full_count++;
+		else
+			battmgr->chg_full_count = 0;
+		if (battmgr->chg_full_count >= 2) {
+			battmgr->chg_full = true;
+			dev_info(battmgr->dev, "battery full at %u mV\n", vbat_mv);
+			power_supply_changed(battmgr->bat_psy);
 		}
+	} else if (vbat_mv < oplus_rechg_mv[region] || !oplus_rechg_mv[region]) {
+		battmgr->chg_full = false;
+		battmgr->chg_full_count = 0;
+		dev_info(battmgr->dev, "recharging at %u mV\n", vbat_mv);
+		power_supply_changed(battmgr->bat_psy);
+	}
+
+	switch (battmgr->usb.adap_type) {
+	case ADAP_SDP:
+		fcc_table = oplus_fcc_sdp_ma;
+		break;
+	case ADAP_CDP:
+		fcc_table = oplus_fcc_cdp_ma;
+		break;
+	default:
+		fcc_table = qcom_battmgr_oplus_pd(battmgr) ? oplus_fcc_pd_ma : oplus_fcc_dcp_ma;
+		break;
+	}
+	fcc_ma = battmgr->chg_full ? 0 : fcc_table[region];
+	fv_mv = oplus_fv_mv[region] + OPLUS_FV_HW_INC_MV - battmgr->chg_fv_dec_mv;
+
+	/* lower the voltage before raising the current, and the reverse */
+	if (fv_mv < battmgr->chg_fv_mv) {
+		qcom_battmgr_oplus_set(battmgr, BATT_VOLT_MAX, fv_mv, &battmgr->chg_fv_mv);
+		qcom_battmgr_oplus_set(battmgr, BATT_CHG_CTRL_LIM, fcc_ma * 1000,
+				       &battmgr->chg_fcc_ma);
+	} else {
+		qcom_battmgr_oplus_set(battmgr, BATT_CHG_CTRL_LIM, fcc_ma * 1000,
+				       &battmgr->chg_fcc_ma);
+		qcom_battmgr_oplus_set(battmgr, BATT_VOLT_MAX, fv_mv, &battmgr->chg_fv_mv);
 	}
 
 out_resched:
-	/* follow the battery temperature while a charger is attached */
+	/* follow the battery while a charger is attached */
 	mod_delayed_work(system_dfl_wq, &battmgr->chg_work, OPLUS_CHG_PERIOD);
 out_unlock:
 	mutex_unlock(&battmgr->lock);
