@@ -732,6 +732,7 @@ static int dsi_phy_runtime_resume(struct device *dev)
 
 static const struct dev_pm_ops dsi_phy_pm_ops = {
 	SET_RUNTIME_PM_OPS(dsi_phy_runtime_suspend, dsi_phy_runtime_resume, NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver dsi_phy_platform_driver = {
