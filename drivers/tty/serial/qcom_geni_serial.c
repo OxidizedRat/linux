@@ -2060,10 +2060,39 @@ static const struct qcom_geni_device_data sa8255p_qcom_geni_uart_data = {
 	.set_rate = geni_serial_set_level,
 };
 
+/*
+ * uart_suspend_port() shuts the port down and drops its runtime PM reference,
+ * but a port with a serdev client (e.g. Bluetooth) keeps runtime-active
+ * children, so the SE never runtime suspends: its clocks (and through GPLL0
+ * the RPMh XO clock) stay on through system suspend. Force it off late in
+ * suspend; the console keeps its resources.
+ */
+static int qcom_geni_serial_suspend_late(struct device *dev)
+{
+	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
+
+	if (uart_console(&port->uport))
+		return 0;
+
+	return pm_runtime_force_suspend(dev);
+}
+
+static int qcom_geni_serial_resume_early(struct device *dev)
+{
+	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
+
+	if (uart_console(&port->uport))
+		return 0;
+
+	return pm_runtime_force_resume(dev);
+}
+
 static const struct dev_pm_ops qcom_geni_serial_pm_ops = {
 	SET_RUNTIME_PM_OPS(qcom_geni_serial_runtime_suspend,
 			   qcom_geni_serial_runtime_resume, NULL)
 	SYSTEM_SLEEP_PM_OPS(qcom_geni_serial_suspend, qcom_geni_serial_resume)
+	LATE_SYSTEM_SLEEP_PM_OPS(qcom_geni_serial_suspend_late,
+				 qcom_geni_serial_resume_early)
 };
 
 static const struct of_device_id qcom_geni_serial_match_table[] = {
