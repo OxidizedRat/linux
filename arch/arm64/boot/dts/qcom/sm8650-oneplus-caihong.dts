@@ -710,6 +710,50 @@
 };
 
 /*
+ * CPU capacities measured on this tablet: single-thread 7-Zip, zstd, Python
+ * and gcc runs pinned to one core per cluster at its top clock; geometric
+ * mean of performance relative to the X4 at 3302 MHz: A520 @2265 0.25,
+ * A720 @3149 0.82, A720 @2957 0.77. The SoC defaults (1024/1792/1894) rate
+ * the A520 ~60% and the A720s ~20% too high relative to the X4, so the
+ * scheduler keeps too much work on the little cores.
+ *
+ * Capacities are normalized at boot against the X4's non-boost maximum
+ * (3052.8 MHz); caihong-config enables the 3302.4 MHz boost OPP, so the X4
+ * value carries the 3302/3052 factor to keep the measured ratios.
+ */
+&cpu0 {
+	capacity-dmips-mhz = <688>;
+};
+
+&cpu1 {
+	capacity-dmips-mhz = <688>;
+};
+
+&cpu2 {
+	capacity-dmips-mhz = <1634>;
+};
+
+&cpu3 {
+	capacity-dmips-mhz = <1634>;
+};
+
+&cpu4 {
+	capacity-dmips-mhz = <1634>;
+};
+
+&cpu5 {
+	capacity-dmips-mhz = <1634>;
+};
+
+&cpu6 {
+	capacity-dmips-mhz = <1634>;
+};
+
+&cpu7 {
+	capacity-dmips-mhz = <2049>;
+};
+
+/*
  * The crypto engine holds a permanent DDR vote (QCOM_ICC_TAG_ALWAYS) that
  * keeps DDR up in suspend; the CPU's crypto extensions are faster for
  * everything it would be used for.
